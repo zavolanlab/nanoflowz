@@ -1,0 +1,21 @@
+
+name: nanopore
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - python=3.10
+  - ipykernel
+  - pandas
+  - scipy
+  - seaborn
+  - scikit-learn
+  - samtools
+  - pysam
+  - htseq
+  - bedtools
+  - lib-pod5
+  - pip
+  - pip:
+      - pod5
