@@ -151,13 +151,15 @@ process visualize_signal {
 
     script:
     def read_id = csv.baseName.replace("_mapped", "")
+    def circle_flag = params.emit_circles ? "--emit_circles" : ""
     """
     plot_signal.py \\
         --csv ${csv} \\
         --output ${read_id}.pdf \\
         --title "Read: ${read_id}" \\
         --figwidth ${params.figwidth} \\
-        --figheight ${params.figheight}
+        --figheight ${params.figheight} \\
+        ${circle_flag}
     """
 }
 
