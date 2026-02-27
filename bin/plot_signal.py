@@ -37,6 +37,12 @@ def main():
         default=3.2,
         help="Figure height in inches (default: 3.2)"
     )
+    # NEW FLAG: Controlled via Nextflow params.emit_circles
+    parser.add_argument(
+        '--emit_circles', 
+        action='store_true', 
+        help="If set, plot red circles for samples that emit bases"
+    )
     args = parser.parse_args()
 
     try:
@@ -65,7 +71,6 @@ def main():
             logging.error(f"Failed to initialize plot: {e}")
             raise
 
-        
         # Check if 'ann' column exists (requires Dorado move tags)
         try:
             if 'ann' in raw_signal_df.columns:
@@ -75,11 +80,29 @@ def main():
                     sns.scatterplot(data=df_neg2, x=x_feature, y=y_feature, color='blue', 
                                     label='unannotated part', s=50, zorder=4, ax=ax)
 
-                # 2. Trimmed primer/adapter (ann == -1)
+                # 2. Trimmed primer/adapter (ann == -1) - SPLIT LINE PLOTS
                 df_neg1 = raw_signal_df[raw_signal_df['ann'] == -1]
                 if not df_neg1.empty:
-                    sns.lineplot(data=df_neg1, x=x_feature, y=y_feature, color='green', 
-                                 label='trimmed primer and adapter', zorder=2, ax=ax)
+                    # Identify bounds of basecalled region to separate left/right adapters
+                    df_base_ref = raw_signal_df[raw_signal_df['ann'].isin([0, 1])]
+                    if not df_base_ref.empty:
+                        base_start = df_base_ref[x_feature].min()
+                        base_end = df_base_ref[x_feature].max()
+
+                        df_left = df_neg1[df_neg1[x_feature] < base_start]
+                        df_right = df_neg1[df_neg1[x_feature] > base_end]
+
+                        if not df_left.empty:
+                            sns.lineplot(data=df_left, x=x_feature, y=y_feature, color='lightgreen', 
+                                         label='trimmed primer and adapter_left', zorder=2, ax=ax)
+                        
+                        if not df_right.empty:
+                            sns.lineplot(data=df_right, x=x_feature, y=y_feature, color='darkgreen', 
+                                         label='trimmed primer and adapter_right', zorder=2, ax=ax)
+                    else:
+                        # Fallback if no basecalled region exists to split them
+                        sns.lineplot(data=df_neg1, x=x_feature, y=y_feature, color='green', 
+                                     label='trimmed primer and adapter', zorder=2, ax=ax)
 
                 # 3. Basecalled region (ann is 0 or 1)
                 df_base = raw_signal_df[raw_signal_df['ann'].isin([0, 1])]
@@ -87,14 +110,16 @@ def main():
                     sns.lineplot(data=df_base, x=x_feature, y=y_feature, color='orange', 
                                  label='basecalled region', zorder=3, ax=ax)
 
-                # 5. Samples that emit bases (ann == 1) - Red Circles
-                df_emit = raw_signal_df[raw_signal_df['ann'] == 1]
-                if not df_emit.empty:
-                    sns.scatterplot(data=df_emit, x=x_feature, y=y_feature, color='red', 
-                                    label='samples that emit bases', s=50, fc="none", ec='red', zorder=6, ax=ax)
+                # 5. Samples that emit bases (ann == 1) - Red Circles (FLAG PROTECTED)
+                if args.emit_circles:
+                    df_emit = raw_signal_df[raw_signal_df['ann'] == 1]
+                    if not df_emit.empty:
+                        sns.scatterplot(data=df_emit, x=x_feature, y=y_feature, color='red', 
+                                        label='samples that emit bases', s=50, fc="none", ec='red', zorder=6, ax=ax)
+                
                 logging.info("Plotted annotated signal regions")
             else:
-                # Fallback: Plot raw signal if 'ann' is missing (Move tags were likely missing in BAM)
+                # Fallback: Plot raw signal if 'ann' is missing
                 logging.warning(f"'ann' column missing in {args.csv}. Plotting raw signal only.")
                 sns.lineplot(data=raw_signal_df, x=x_feature, y=y_feature, color='grey', 
                              alpha=0.5, label='raw signal (unannotated)', ax=ax)
@@ -116,6 +141,7 @@ def main():
 
         try:
             ax.set(title=args.title)
+            ax.tick_params(left=True, bottom=True)
             
             # Legend placement
             ax.legend(bbox_to_anchor=(1.05, 1), loc=2, borderaxespad=0.0)
