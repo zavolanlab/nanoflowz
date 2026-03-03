@@ -1,57 +1,73 @@
 #!/usr/bin/env nextflow
 nextflow.enable.dsl = 2
 
+/*
+========================================================================================
+    NANAFLOWZ MAIN PIPELINE
+    Optimized for consolidated subsampling and signal visualization.
+========================================================================================
+*/
+
 // Check if TSV is provided
 if( !params.tsv ) { exit 1, "Please provide the input TSV file with --tsv" }
 
+// Default base directory for QC plots
+params.qc_base_dir = "${params.outdir}/QC_plots/raw_signal_annotation"
+
 workflow {
+    // 1. Initial Data Ingest: Create a stream of (sample_id, pod5_file)
     samples_ch = channel
         .fromPath(params.tsv)
         .splitCsv(header: true, sep: '\t')
         .map { row -> tuple(row.sample_id, file(row.pod5)) }
 
-    // 1. Initial basecall
+    // 2. Initial basecall: Parallel processing per POD5 chunk
     dorado_basecall(samples_ch)
 
-    // 2. Extract random IDs
-    extract_read_ids(dorado_basecall.out.bam)
+    // 3. Merge: Combine small BAMs into a single sample-level BAM
+    merge_input_ch = dorado_basecall.out.bam.groupTuple()
+    merge_bams(merge_input_ch)
 
-    // 3. Create subset POD5
-    filter_input_ch = samples_ch.join(extract_read_ids.out.ids_file)
+    // 4. Selection: Pick the random Read IDs to investigate
+    extract_read_ids(merge_bams.out.bam)
+
+    // We take all original POD5 paths and group them by sample_id
+    // This allows one process to search all 1,400 files at once.
+    all_pod5s_per_sample = samples_ch.map { id, pod5 -> [id, pod5] }.groupTuple()
     
-    filter_pod5(filter_input_ch)
+    filter_input_ch = extract_read_ids.out.ids_file.join(all_pod5s_per_sample)
+    filter_pod5_combined(filter_input_ch)
 
-    // 4. Re-run Dorado for moves (Needs the POD5 subset)
-    dorado_emit_moves(filter_pod5.out)
+    // 6. Deep Dive: Re-run Dorado for moves on the subsampled POD5
+    dorado_emit_moves(filter_pod5_combined.out.pod5)
 
-    // Join POD5 and BAM before generating CSV
-    // filter_pod5.out is [sample_id, pod5]
-    // dorado_emit_moves.out.bam is [sample_id, bam]
-    final_input_ch = filter_pod5.out.join(dorado_emit_moves.out.bam)
-    
+    // 7. Prepare Data: Join the subsampled POD5 and its Move-BAM to generate CSVs
+    final_input_ch = filter_pod5_combined.out.pod5.join(dorado_emit_moves.out.bam)
     generate_signal_df(final_input_ch)
 
-    visualize_signal(generate_signal_df.out.flatten())
+    // 8. Visualize: Plot the squiggles for each individual read
+    visualize_input = generate_signal_df.out.results.transpose()
+    visualize_signal(visualize_input)
 }
+
+/*
+========================================================================================
+    PROCESS DEFINITIONS
+========================================================================================
+*/
 
 process dorado_basecall {
     tag "${sample_id}"
     
-    // This moves the final files to your results folder
-    publishDir "${params.outdir}/basecalling", mode: 'copy'
-
     input:
     tuple val(sample_id), path(pod5_input)
 
     output:
-    tuple val(sample_id), path("${sample_id}.dorado.sup.sorted.bam"), emit: bam
-    tuple val(sample_id), path("${sample_id}.dorado.sup.sorted.bam.bai"), emit: bai
+    tuple val(sample_id), path("chunk_${pod5_input.baseName}.bam"), emit: bam
 
     script:
     """
-    OUT_BAM="${sample_id}.dorado.sup.sorted.bam"
-
-    # Run Dorado and pipe directly to Samtools for sorting
+    OUT_BAM="chunk_${pod5_input.baseName}.bam"
     ${params.dorado} basecaller \\
         ${params.model} \\
         ${pod5_input} \\
@@ -61,9 +77,24 @@ process dorado_basecall {
         --reference ${params.ref} \\
         --device "cuda:all" \\
         | samtools sort -@ ${task.cpus} -o \$OUT_BAM -
-    
-    # Index the resulting BAM
-    samtools index -@ ${task.cpus} \$OUT_BAM
+    """
+}
+
+process merge_bams {
+    tag "${sample_id}"
+    publishDir "${params.outdir}/basecalling", mode: 'copy'
+
+    input:
+    tuple val(sample_id), path(bams)
+
+    output:
+    tuple val(sample_id), path("${sample_id}.dorado.sup.sorted.bam"), emit: bam
+    tuple val(sample_id), path("${sample_id}.dorado.sup.sorted.bam.bai"), emit: bai
+
+    script:
+    """
+    samtools merge -@ ${task.cpus} ${sample_id}.dorado.sup.sorted.bam ${bams}
+    samtools index -@ ${task.cpus} ${sample_id}.dorado.sup.sorted.bam
     """
 }
 
@@ -81,20 +112,24 @@ process extract_read_ids {
     """
 }
 
-process filter_pod5 {
+process filter_pod5_combined {
     tag "${sample_id}"
     publishDir "${params.outdir}/subsampled_pod5", mode: 'copy'
 
     input:
-    // This matches the output of the .join()
-    tuple val(sample_id), path(original_pod5), path(read_ids_txt)
+    tuple val(sample_id), path(read_ids_txt), path(all_pod5_chunks)
 
     output:
-    tuple val(sample_id), path("${sample_id}.subset.pod5")
+    tuple val(sample_id), path("${sample_id}.subset.pod5"), emit: pod5
 
     script:
     """
-    pod5 filter ${original_pod5} --output ${sample_id}.subset.pod5 --ids ${read_ids_txt} --force-overwrite
+    # Scans all 1,400 chunks in one pass to find the target IDs
+    pod5 filter ${all_pod5_chunks} \\
+        --output ${sample_id}.subset.pod5 \\
+        --ids ${read_ids_txt} \\
+        --missing-ok \\
+        --force-overwrite
     """
 }
 
@@ -106,11 +141,10 @@ process dorado_emit_moves {
     tuple val(sample_id), path(subset_pod5)
 
     output:
-    tuple val(sample_id), path("${sample_id}.moves.bam"), emit: bam
+    tuple val(sample_id), path("${subset_pod5.baseName}.moves.bam"), emit: bam
 
     script:
     """
-    # Pipe Dorado output to samtools to ensure a valid, compressed BAM with header
     ${params.dorado} basecaller \\
         ${params.model} \\
         ${subset_pod5} \\
@@ -119,7 +153,7 @@ process dorado_emit_moves {
         --poly-a-config ${params.polyA} \\
         --mm2-opts "-x splice -Y" \\
         --reference ${params.ref} \\
-        --device "cuda:all" | samtools view -bS - > ${sample_id}.moves.bam
+        --device "cuda:all" | samtools view -bS - > ${subset_pod5.baseName}.moves.bam
     """
 }
 
@@ -131,7 +165,7 @@ process generate_signal_df {
     tuple val(sample_id), path(subset_pod5), path(moves_bam)
 
     output:
-    path "*.csv"
+    tuple val(sample_id), val(subset_pod5.baseName), path("*.csv"), emit: results
 
     script:
     """
@@ -140,11 +174,11 @@ process generate_signal_df {
 }
 
 process visualize_signal {
-    tag "${csv.baseName}"
-    publishDir "${params.outdir}/plots", mode: 'copy'
+    tag "${sample_id} - ${pod5_name}"
+    publishDir "${params.qc_base_dir}/${sample_id}/${pod5_name}", mode: 'copy'
 
     input:
-    path csv
+    tuple val(sample_id), val(pod5_name), path(csv)
 
     output:
     path "*.pdf"
@@ -162,4 +196,3 @@ process visualize_signal {
         ${circle_flag}
     """
 }
-
