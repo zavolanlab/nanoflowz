@@ -4,12 +4,13 @@ nextflow.enable.dsl = 2
 /*
 ========================================================================================
     NANAFLOWZ MAIN PIPELINE
-    Optimized for consolidated subsampling and signal visualization.
+    Optimized for consolidated subsampling, signal visualization, and isoform analysis.
 ========================================================================================
 */
 
 // Check if TSV is provided
 if( !params.tsv ) { exit 1, "Please provide the input TSV file with --tsv" }
+if( !params.reference_gtf ) { exit 1, "Please provide the reference GTF file with --reference_gtf" }
 
 // Default base directory for QC plots
 params.qc_base_dir = "${params.outdir}/QC_plots/raw_signal_annotation"
@@ -28,11 +29,31 @@ workflow {
     merge_input_ch = dorado_basecall.out.bam.groupTuple()
     merge_bams(merge_input_ch)
 
+    // ==============================================================================
+    // ISOFORM ANALYSIS
+    // ==============================================================================
+
+    // A. Collect all merged BAM files to build the master enriched transcriptome
+    all_bams_ch = merge_bams.out.bam.map { it[1] }.collect()
+    
+    transcriptome_annotation_enrichment(
+        all_bams_ch, 
+        params.reference_gtf
+    )
+
+    // B. Assign individual alignments for each sample to the enriched transcriptome
+    read_to_transcript_assignment(
+        merge_bams.out.bam, 
+        transcriptome_annotation_enrichment.out.gtf
+    )
+
+    // ==============================================================================
+
     // 4. Selection: Pick the random Read IDs to investigate
     extract_read_ids(merge_bams.out.bam)
 
-    // We take all original POD5 paths and group them by sample_id
-    // This allows one process to search all 1,400 files at once.
+    // 5. We take all original POD5 paths and group them by sample_id
+    // This allows one process to search all files at once.
     all_pod5s_per_sample = samples_ch.map { id, pod5 -> [id, pod5] }.groupTuple()
     
     filter_input_ch = extract_read_ids.out.ids_file.join(all_pod5s_per_sample)
@@ -98,6 +119,54 @@ process merge_bams {
     """
 }
 
+process transcriptome_annotation_enrichment {
+    label 'process_high'
+    publishDir "${params.outdir}/transcriptome", mode: 'copy'
+
+    input:
+    path bams
+    path reference_gtf
+
+    output:
+    path "master_enriched.tsv", emit: gtf
+
+    script:
+    """
+    # Create a manifest file containing the paths of all staged BAM files
+    ls *.bam > bam_list.txt
+    
+    assign_ONT_reads_to_isoforms.py \\
+        --mode enrich \\
+        --input_bam_files bam_list.txt \\
+        --input_gtf_file ${reference_gtf} \\
+        --output_prefix master
+    """
+}
+
+process read_to_transcript_assignment {
+    tag "${sample_id}"
+    publishDir "${params.outdir}/assignments", mode: 'copy'
+
+    input:
+    tuple val(sample_id), path(bam)
+    path enriched_gtf
+
+    output:
+    tuple val(sample_id), path("${sample_id}_assignments.tsv.gz"), emit: tsv
+    path "${sample_id}_unassigned.tsv", optional: true
+
+    script:
+    """
+    assign_ONT_reads_to_isoforms.py \\
+        --mode assign \\
+        --input_bam_files ${bam} \\
+        --input_gtf_file ${enriched_gtf} \\
+        --output_prefix ${sample_id}
+    
+    gzip ${sample_id}_assignments.tsv
+    """
+}
+
 process extract_read_ids {
     tag "${sample_id}"
     input:
@@ -124,7 +193,7 @@ process filter_pod5_combined {
 
     script:
     """
-    # Scans all 1,400 chunks in one pass to find the target IDs
+    # Scans all chunks in one pass to find the target IDs
     pod5 filter ${all_pod5_chunks} \\
         --output ${sample_id}.subset.pod5 \\
         --ids ${read_ids_txt} \\
