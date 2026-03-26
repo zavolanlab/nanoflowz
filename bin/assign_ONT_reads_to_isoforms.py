@@ -38,6 +38,7 @@ def main():
             if not algn.aligned or algn.supplementary:
                 continue
             
+            # Extract optional tags pt and qs
             try:
                 pt_val = algn.optional_field("pt")
             except (KeyError, AttributeError):
@@ -94,14 +95,15 @@ def main():
         
         final_cols = ['alignment_id', 'read_id', 'transcript_id', 'chrom', 'start', 'end', 'strand', 'pt', 'qs']
         
-        # Added .copy() to avoid SettingWithCopy warnings
+        # Process Unassigned
         unassigned = assignments[assignments['transcript_id'].isna()].copy()
-        unassigned_path = f"{args.output_prefix}_unassigned.tsv"
-        unassigned[final_cols].to_csv(unassigned_path, sep='\t', index=False)
+        unassigned_path = f"{args.output_prefix}_unassigned.tsv.gz"
+        unassigned[final_cols].to_csv(unassigned_path, sep='\t', index=False, compression='gzip')
             
+        # Process Assigned
         assigned = assignments.dropna(subset=['transcript_id']).copy()
-        out_path = f"{args.output_prefix}_assignments.tsv"
-        assigned[final_cols].to_csv(out_path, sep='\t', index=False)
+        out_path = f"{args.output_prefix}_assignments.tsv.gz"
+        assigned[final_cols].to_csv(out_path, sep='\t', index=False, compression='gzip')
             
         print(f"[SUCCESS] Assigned: {len(assigned)} | Unassigned: {len(unassigned)}. Saved to {out_path}")
 
