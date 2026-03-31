@@ -9,7 +9,15 @@ import numpy as np
 import HTSeq
 import ast
 import gzip
+import logging
 from argparse import ArgumentParser, RawTextHelpFormatter
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
 
 def get_introns_from_exons(exons):
     """Converts a list of (start, end) exons to an intron string."""
@@ -44,7 +52,7 @@ def main():
     # --- MODE: ENRICH ---
     if args.mode == 'enrich':
         # 1. Extract Reference Transcriptome Structure
-        print(f"[INFO] Parsing Reference GTF: {args.input_gtf_file}")
+        logging.info(f"Parsing Reference GTF: {args.input_gtf_file}")
         gtf_cols = ['chrom', 'source', 'feature', 'start', 'end', 'score', 'strand', 'frame', 'attribute']
         ref_gtf_full = pd.read_csv(args.input_gtf_file, sep='\t', comment='#', header=None, names=gtf_cols, skiprows=args.gtf_skip_rows)
         
@@ -72,7 +80,7 @@ def main():
         ref_df = pd.DataFrame(ref_data)
 
         # 2. Extract Observed Transcriptome from BAMs
-        print("[INFO] Parsing BAM Alignments...")
+        logging.info("Parsing BAM Alignments...")
         read_coords = []
         algn_counter = 0 
         for bam_path in bam_paths:
@@ -99,7 +107,7 @@ def main():
         read_df = pd.DataFrame(read_coords)
 
         # 3. Merge and Cluster 3' Ends
-        print(f"[INFO] Clustering 3' ends (distance: {args.ThreePrimeEnd_clustering_distance}bp)...")
+        logging.info(f"Clustering 3' ends (distance: {args.ThreePrimeEnd_clustering_distance}bp)...")
         combined_df = pd.concat([ref_df, read_df], ignore_index=True)
         
         # Sort and calculate clusters based on proximity
@@ -137,7 +145,7 @@ def main():
         # Save master TSV for the 'assign' mode
         out_tsv = f"{args.output_prefix}_enriched.tsv"
         isoforms_df_final.to_csv(out_tsv, sep='\t', index=False)
-        print(f"[SUCCESS] Enriched TSV saved to {out_tsv}")
+        logging.info(f"Enriched TSV saved to {out_tsv}")
 
         # 5. Generate GTF file
         gtf_lines = []
@@ -159,11 +167,11 @@ def main():
 
         out_gtf_path = f"{args.output_prefix}_enriched.gtf"
         pd.DataFrame(gtf_lines).to_csv(out_gtf_path, sep='\t', header=False, index=False, quoting=3)
-        print(f"[SUCCESS] Enriched GTF saved to {out_gtf_path}")
+        logging.info(f"Enriched GTF saved to {out_gtf_path}")
 
     # --- MODE: ASSIGN ---
     elif args.mode == 'assign':
-        print("[INFO] Loading enriched reference for assignment...")
+        logging.info("Loading enriched reference for assignment...")
         # Note: In assign mode, input_gtf_file should be the .tsv produced by 'enrich'
         master_ref = pd.read_csv(args.input_gtf_file, sep='\t')
         isoform_lookup = dict(zip(zip(master_ref.chrom, master_ref.strand, master_ref.introns), master_ref.transcript_id))
@@ -218,8 +226,8 @@ def main():
                     
                     algn_counter += 1
 
-        print(f"[SUCCESS] Assigned: {assigned_count} | Unassigned: {unassigned_count}")
-        print(f"Results saved to: {out_assigned}")
+        logging.info(f"Assignment Complete | Assigned: {assigned_count} | Unassigned: {unassigned_count}")
+        logging.info(f"Results saved to: {out_assigned}")
 
 if __name__ == "__main__":
     main()
