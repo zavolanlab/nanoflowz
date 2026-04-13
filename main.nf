@@ -44,7 +44,7 @@ workflow {
     // B. Assign individual alignments for each sample to the enriched transcriptome
     read_to_transcript_assignment(
         merge_bams.out.bam, 
-        transcriptome_annotation_enrichment.out.gtf
+        transcriptome_annotation_enrichment.out.tsv
     )
 
     // ==============================================================================
@@ -128,7 +128,8 @@ process transcriptome_annotation_enrichment {
     path reference_gtf
 
     output:
-    path "master_enriched.tsv", emit: gtf
+    path "master_enriched.tsv", emit: tsv
+    path "master_enriched.gtf", emit: gtf
 
     script:
     """
@@ -149,21 +150,19 @@ process read_to_transcript_assignment {
 
     input:
     tuple val(sample_id), path(bam)
-    path enriched_gtf
+    path enriched_tsv
 
     output:
     tuple val(sample_id), path("${sample_id}_assignments.tsv.gz"), emit: tsv
-    path "${sample_id}_unassigned.tsv", optional: true
+    path "${sample_id}_unassigned.tsv.gz", optional: true
 
     script:
     """
     assign_ONT_reads_to_isoforms.py \\
         --mode assign \\
         --input_bam_files ${bam} \\
-        --input_gtf_file ${enriched_gtf} \\
-        --output_prefix ${sample_id}
-    
-    gzip ${sample_id}_assignments.tsv
+        --input_gtf_file ${enriched_tsv} \\
+        --output_prefix ${sample_id}    
     """
 }
 
