@@ -1,128 +1,133 @@
-# Nanoflowz: Nanopore Signal Processing Pipeline
+# Nanoflowz
+[![Nextflow](https://img.shields.io/badge/nextflow%20DSL2-%E2%89%A522.10.1-23aa62.svg)](https://www.nextflow.io/) [![Conda](https://img.shields.io/badge/conda-supported-lightgrey.svg)](https://docs.conda.io/en/latest/)
 
-Project homepage: [Nanoflowz on GitHub](https://github.com/zavolanlab/nanoflowz)
+**Nanoflowz** is a bioinformatics analysis pipeline for Oxford Nanopore Technologies (ONT) RNA and cDNA sequencing data. 
+It is tailored for GPU-accelerated basecalling, producing quality control plots, _de novo_ transcriptome assembly and assigning alignments to transcripts. 
 
-Nanoflowz is a Nextflow DSL2 pipeline for processing Oxford Nanopore sequencing data from POD5 files to:
+The pipeline is built using [Nextflow](https://www.nextflow.io), a workflow tool to run tasks across multiple compute infrastructures in a very portable manner. It uses Conda environments to automatically manage and isolate software dependencies.
 
-- Dorado-basecalled and aligned reads  
-- Subsampled POD5 signal  
-- Annotated signal-level CSVs  
-- Per-read PDF signal plots
+## Pipeline Summary
+1. **GPU Basecalling (`dorado`)**: Performs basecalling and poly-A tail estimation natively on NVIDIA GPUs.
+2. **Alignment & Merging (`minimap2`)**: Maps reads to the reference genome using minimap2 and merges BAMs (e.g. technical replicates from samples).
+3. **De novo transcriptome assembly**: Enriches input transcriptome annotations based on observed read alignments
+4. **Isoform Analysis (`custom python`)**: Assigns alignments to specific transcript isoforms.
+5. **Annotating raw current data from a subsample of reads**: 
+5.1 **Signal Extraction (`pod5`)**: Subsamples reads of interest and extracts corresponding raw signal chunks from `.pod5` files.
+5.2 **Move-table Emission (`dorado`)**: Re-processes subsetted reads to emit basecaller move-tables. 
+5.3 **Dataframe Generation & QC Visualization (`seaborn`)**: Synchronizes sequence strings with raw signal variations and renders PDF plots for individual reads.
 
-The main workflow is defined in `main.nf`.
+## Quick Start
 
----
+### 1. Prepare your Input Data (`samples.tsv`)
+You will need to create a tab-separated file (referred to as `tsv` below in step 4) containing your sample IDs and the **absolute paths** to your raw `.pod5` files. 
+Each `sample_id` may correspond to multiple `.pod5` files which will be basecalled and aligned independently and then merged to `sample_id`-level `.bam` files.
+*(Note: Do not use relative symlinks).*
 
-## Overview
-
-Given a TSV file describing samples and their POD5 input files, the pipeline:
-
-1. **Basecalls reads with Dorado**
-   - Aligns reads to a reference with minimap2 via Dorado
-   - Sorts and indexes the resulting BAM
-
-2. **Extracts random read IDs**
-   - Samples a subset of read IDs from the basecalled BAM using `params.num_reads`
-
-3. **Subsamples POD5 files**
-   - Filters the original POD5 to only include the sampled read IDs
-
-4. **Re-runs Dorado with moves**
-   - Generates a BAM with movement (`--emit-moves`) information on the subsampled POD5
-
-5. **Generates annotated signal data**
-   - Runs `pod5_to_df.py` to produce CSVs with signal-level annotations
-
-6. **Visualizes signal**
-   - Runs `plot_signal.py` to create per-read PDF plots
-
----
-
-## Input TSV format
-
-The pipeline expects a tab-delimited file with at least the following columns:
-
-- `sample_id` – unique identifier for the sample  
-- `pod5` – path to the input POD5 file
-
-Example:
-
-```text
-sample_id    pod5
-sampleA      /path/to/sampleA.pod5
-sampleB      /path/to/sampleB.pod5
+```tsv
+sample_id	pod5
+barcode01	/absolute/path/to/data/barcode01/file_1.pod5
+barcode01	/absolute/path/to/data/barcode01/file_2.pod5
+barcode02	/absolute/path/to/data/barcode02/file_1.pod5
+barcode02	/absolute/path/to/data/barcode02/file_2.pod5
 ```
 
-You must pass this file with `--tsv`.
+### 2. Install Dorado
+Currently, the only officially supported way is to install Dorado from their [github repository](https://github.com/nanoporetech/dorado). 
+Follow the instructions there.
+Get the path to `dorado` executor (e.g. `$HOME/packages/dorado-1.4.0-linux-x64/bin/dorado`).
 
----
+### 3. Download basecalling model(s) for Dorado
+The core of the Dorado is a neural network that transforms original raw current data (current vs time) for every read into a nucleotide read sequence.
 
-## Key processes
+For that, ONT trained several neural network models optimized for different protocols and molecule types (DNA/cDNA or RNA).
 
-- **`dorado_basecall`**: Dorado basecalling + alignment, outputs `${sample_id}.dorado.sup.sorted.bam` and `.bai`.
-- **`extract_read_ids`**: Extracts unique read IDs from BAM and randomly selects `params.num_reads`.
-- **`filter_pod5`**: Creates `${sample_id}.subset.pod5` containing only selected reads.
-- **`dorado_emit_moves`**: Runs Dorado with `--emit-moves` on the subset POD5, outputting `${sample_id}.moves.bam`.
-- **`generate_signal_df`**: Calls `pod5_to_df.py` to create annotated signal-level CSVs.
-- **`visualize_signal`**: Calls `plot_signal.py` to generate per-read PDF plots.
+Currently, the list of available models is available [here](https://software-docs.nanoporetech.com/dorado/latest/models/list/).
 
----
+By default, we recommend to use "super-accurate" (`_sup`) models which at least in particular circumstances can give drastically more accurate read sequences as an output (internal research, not published). This is contrast to [current recommendation of ONT](https://software-docs.nanoporetech.com/dorado/latest/models/models/#understanding-model-names) to stick to "high-accuracy" `_hac` models by default.
 
-## Requirements
+### 4. Define your Parameters (`run_params.json`)
+Instead of modifying the core `nextflow.config` file, Nanoflowz accepts a JSON file containing your run-specific inputs, reference genomes, and basecaller model paths. Here is the example of the specification for a human cell line data:
 
-- **Nextflow** (DSL2 enabled)
-- **Dorado** (GPU-capable, CUDA)
-- **samtools**
-- **pod5** CLI tools
-- **Python** environment with dependencies for:
-  - `pod5_to_df.py`
-  - `plot_signal.py` (e.g. `pandas`, `matplotlib`, etc.)
-- Access to a **reference genome** FASTA (for mapping)
+```json
+{
+    "tsv": "/absolute/path/to/samples.tsv",
+    "rundir": "/absolute/path/to/run_output_directory",
+    "dorado": "/path/to/dorado-1.4.0-linux-x64/bin/dorado",
+    "model": "/path/to/models/dna_r10.4.1_e8.2_400bps_sup@v5.2.0",
+    "polyA": "/path/to/polyA_config.toml",
+    "ref": "/path/to/Homo_sapiens.GRCh38.dna.primary_assembly.fa",
+    "reference_gtf": "/path/to/gencode.v42.annotation.gtf"
+}
+```
 
----
+Output directory can be specified by setting `outdir` parameter, by default set to `${params.rundir}/results`.
 
-## Parameters (commonly used)
+Nextflow working directory with all the intermediate files can be specified by setting `workdir_param` parameter, by default set to `${params.rundir}/work`.
 
-Configured via CLI or `nextflow.config`:
+### 5. Run the Pipeline
+Execute the pipeline using the `-profile conda` flag. This ensures Nextflow handles all Python/Samtools dependencies automatically by automatically creating conda environments from `.yml` files stored in [envs](envs/) subdirectory.
 
-- `--tsv` – path to the input TSV file **(required)**
-- `--outdir` – output directory for results (e.g. `results/`)
-- `--dorado` – path or name of the Dorado executable
-- `--model` – Dorado model name/path
-- `--polyA` – poly-A configuration file for Dorado
-- `--ref` – path to reference genome FASTA
-- `--num_reads` – number of read IDs to sample per sample
-- `--figwidth` – plot width for `plot_signal.py`
-- `--figheight` – plot height for `plot_signal.py`
+Look [here](https://docs.seqera.io/nextflow/cli) to see various ways to execute nextflow from CLI.
 
-See `main.nf` for the authoritative parameter list.
-
----
-
-## Running the pipeline
-
-Basic example (parameters from `nextflow.config`):
-
+Currently, we recommend to stick to **standard Local Execution** method. Clone the reposity first to your local machine:
 ```bash
-nextflow run main.nf --tsv samples.tsv
+git clone https://github.com/zavolanlab/nanoflowz.git
+cd nanoflowz
+echo "$(pwd)/main.nf" # this will print you the absolute path to main nanoflowz executor script
+```
+Then you can use the `run_params.json` file created at step 4 as an argument:
+```bash
+nextflow run <put the printed path to main.nf here> -params-file <put the path to your created run_params.json file> -profile conda -resume
 ```
 
-All other parameters (e.g. `outdir`, `dorado`, `model`, `polyA`, `ref`, `num_reads`, plotting settings) should be set in your `nextflow.config`.
+## Configuring in Python / Jupyter notebook
+Nanoflowz is designed to be easily wrapped by Python scripts or Jupyter Notebooks. You can dynamically generate the required parameter files and trigger the pipeline programmatically. See the example in the jupyter notebook [ONT_analysis.ipynb](https://github.com/zavolanlab/APA_localization/blob/9ddaf03675811d69191fa9e6aa0efb2211728d58/ONT_analysis.ipynb) from [another repository](https://github.com/zavolanlab/APA_localization/tree/ont_analysis) of Zavolan Lab.
 
----
+```python
+import json
+import subprocess
+from pathlib import Path
 
-## Outputs
+# 1. Define your parameters dictionary
+json_params_content = {
+    "tsv": str(Path('samples.tsv').resolve()),
+    "rundir": str(Path('./wf_runs/run_01').resolve()),
+    "dorado": "/absolute/path/to/dorado",
+    "model": "/absolute/path/to/model",
+    "polyA": "/absolute/path/to/polyA_config.toml",
+    "ref": "/absolute/path/to/genome.fa",
+    "reference_gtf": "/absolute/path/to/annotation.gtf"
+}
 
-Under `--outdir` you should see:
+# 2. Write the JSON file
+params_file = Path('run_params.json')
+with open(params_file, "w") as f:
+    json.dump(json_params_content, f, indent=4)
 
-- `basecalling/`
-  - `${sample_id}.dorado.sup.sorted.bam`
-  - `${sample_id}.dorado.sup.sorted.bam.bai`
-- `subsampled_pod5/`
-  - `${sample_id}.subset.pod5`
-- `moves_bam/`
-  - `${sample_id}.moves.bam`
-- `annotated_data/`
-  - `*.csv` annotated signal tables
-- `plots/`
-  - `*.pdf` signal plots per read
+# 3. Trigger Nextflow
+cmd = [
+    "nextflow", "run", "zavolanlab/nanoflowz",
+    "-params-file", str(params_file.resolve()),
+    "-profile", "conda"
+]
+subprocess.run(cmd, check=True)
+```
+
+## Output Structure
+Nanoflowz uses a "Sibling Architecture" inside your designated `rundir` to keep your final biological results perfectly separated from heavy temporary files.
+
+```tree
+rundir/
+├── results/              # ✨ Pristine final outputs (BAMs, CSVs, PDFs)
+│   ├── basecalling/
+│   ├── transcriptome/
+│   ├── QC_plots/
+│   └── ...
+├── work/                 # 🗑️ Nextflow temporary execution directories (Safe to delete post-run)
+└── conda_envs/           # 📦 Isolated software environments for this specific run
+```
+
+## Credits
+Nanoflowz was originally written by the Zavolan Lab.
+
+**CURRENT STATUS**: please cite this github repository if you use **nanoflowz** in your research.

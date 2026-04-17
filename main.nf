@@ -79,6 +79,8 @@ workflow {
 
 process dorado_basecall {
     tag "${sample_id}"
+    label 'process_gpu'
+    label 'env_samtools'  // Samtools is used in the pipe
     
     input:
     tuple val(sample_id), path(pod5_input)
@@ -104,6 +106,8 @@ process dorado_basecall {
 process merge_bams {
     tag "${sample_id}"
     publishDir "${params.outdir}/basecalling", mode: 'copy'
+    label 'process_medium'
+    label 'env_samtools'
 
     input:
     tuple val(sample_id), path(bams)
@@ -120,8 +124,9 @@ process merge_bams {
 }
 
 process transcriptome_annotation_enrichment {
-    label 'process_high'
     publishDir "${params.outdir}/transcriptome", mode: 'copy'
+    label 'process_high_memory'
+    label 'env_isoform'
 
     input:
     path bams
@@ -147,6 +152,8 @@ process transcriptome_annotation_enrichment {
 process read_to_transcript_assignment {
     tag "${sample_id}"
     publishDir "${params.outdir}/assignments", mode: 'copy'
+    label 'process_dynamic_memory'
+    label 'env_isoform'
 
     input:
     tuple val(sample_id), path(bam)
@@ -168,6 +175,9 @@ process read_to_transcript_assignment {
 
 process extract_read_ids {
     tag "${sample_id}"
+    label 'process_single'
+    label 'env_samtools'
+    
     input:
     tuple val(sample_id), path(bam)
 
@@ -183,6 +193,8 @@ process extract_read_ids {
 process filter_pod5_combined {
     tag "${sample_id}"
     publishDir "${params.outdir}/subsampled_pod5", mode: 'copy'
+    label 'process_single'
+    label 'env_pod5'
 
     input:
     tuple val(sample_id), path(read_ids_txt), path(all_pod5_chunks)
@@ -204,7 +216,8 @@ process filter_pod5_combined {
 process dorado_emit_moves {
     tag "${sample_id}"
     publishDir "${params.outdir}/moves_bam", mode: 'copy'
-    
+    label 'process_gpu'
+    label 'env_samtools'    
     input:
     tuple val(sample_id), path(subset_pod5)
 
@@ -228,6 +241,8 @@ process dorado_emit_moves {
 process generate_signal_df {
     tag "${sample_id}"
     publishDir "${params.outdir}/annotated_data", mode: 'copy'
+    label 'process_single'
+    label 'env_pod5'
 
     input:
     tuple val(sample_id), path(subset_pod5), path(moves_bam)
@@ -244,6 +259,8 @@ process generate_signal_df {
 process visualize_signal {
     tag "${sample_id} - ${pod5_name}"
     publishDir "${params.qc_base_dir}/${sample_id}/${pod5_name}", mode: 'copy'
+    label 'process_low'
+    label 'env_plot'
 
     input:
     tuple val(sample_id), val(pod5_name), path(csv)

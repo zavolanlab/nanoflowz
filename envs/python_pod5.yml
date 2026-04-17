@@ -1,0 +1,11 @@
+name: nf-pod5
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.10
+  - pandas
+  - pysam
+  - pip
+  - pip:
+      - pod5

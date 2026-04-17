@@ -1,0 +1,9 @@
+name: nf-plot
+channels:
+  - conda-forge
+dependencies:
+  - python=3
+  - pandas
+  - scipy
+  - seaborn
+  - scikit-learn

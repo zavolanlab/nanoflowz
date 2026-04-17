@@ -1,0 +1,9 @@
+name: nf-isoform
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python
+  - pysam
+  - htseq
+  - pandas
