@@ -50,13 +50,14 @@ Instead of modifying the core `nextflow.config` file, Nanoflowz accepts a JSON f
 
 ```json
 {
-    "tsv": "/absolute/path/to/samples.tsv",
-    "rundir": "/absolute/path/to/run_output_directory",
+    "tsv": "/path/to/samples.tsv",
+    "rundir": "/path/to/run_output_directory",
     "dorado": "/path/to/dorado-1.4.0-linux-x64/bin/dorado",
     "model": "/path/to/models/dna_r10.4.1_e8.2_400bps_sup@v5.2.0",
     "polyA": "/path/to/polyA_config.toml",
     "ref": "/path/to/Homo_sapiens.GRCh38.dna.primary_assembly.fa",
-    "reference_gtf": "/path/to/gencode.v42.annotation.gtf"
+    "reference_gtf": "/path/to/gencode.v42.annotation.gtf",
+    "conda_envs_dir": "/path/to/where_nanoflowz_should_create_conda_envs", # default is rundir/conda_envs
 }
 ```
 
@@ -106,7 +107,7 @@ with open(params_file, "w") as f:
 
 # 3. Trigger Nextflow
 cmd = [
-    "nextflow", "run", "zavolanlab/nanoflowz",
+    "nextflow", "run", "main.nf", # assuming we are in the nanoflowz directory
     "-params-file", str(params_file.resolve()),
     "-profile", "conda"
 ]
