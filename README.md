@@ -43,7 +43,7 @@ For that, ONT trained several neural network models optimized for different prot
 
 Currently, the list of available models is available [here](https://software-docs.nanoporetech.com/dorado/latest/models/list/).
 
-By default, we recommend to use "super-accurate" (`_sup`) models which at least in particular circumstances can give drastically more accurate read sequences as an output (internal research, not published). This is contrast to [current recommendation of ONT](https://software-docs.nanoporetech.com/dorado/latest/models/models/#understanding-model-names) to stick to "high-accuracy" `_hac` models by default.
+By default, we recommend to use "super-accurate" (`_sup`) models which at least in particular circumstances can give drastically more accurate read sequences as an output (internal research, not published). This is in contrast to the [current recommendation of ONT](https://software-docs.nanoporetech.com/dorado/latest/models/models/#understanding-model-names) to stick to "high-accuracy" `_hac` models by default.
 
 ### 4. Define your Parameters (`run_params.json`)
 Instead of modifying the core `nextflow.config` file, Nanoflowz accepts a JSON file containing your run-specific inputs, reference genomes, and basecaller model paths. Here is the example of the specification for a human cell line data:

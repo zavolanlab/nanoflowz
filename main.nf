@@ -16,17 +16,24 @@ if( !params.reference_gtf ) { exit 1, "Please provide the reference GTF file wit
 params.qc_base_dir = "${params.outdir}/QC_plots/raw_signal_annotation"
 
 workflow {
+    
+    // 0. Build the minimap2 index once from the reference FASTA
+    build_minimap2_index(params.ref)
+
     // 1. Initial Data Ingest: Create a stream of (sample_id, pod5_file)
     samples_ch = channel
         .fromPath(params.tsv)
         .splitCsv(header: true, sep: '\t')
         .map { row -> tuple(row.sample_id, file(row.pod5)) }
 
-    // 2. Initial basecall: Parallel processing per POD5 chunk
+    // 2.a Initial basecall: Parallel processing per POD5 chunk
     dorado_basecall(samples_ch)
 
+    // 2.b Alignment: Pass both the unmapped BAMs and the compiled index
+    minimap2_align(dorado_basecall.out.ubam, build_minimap2_index.out.mmi)
+
     // 3. Merge: Combine small BAMs into a single sample-level BAM
-    merge_input_ch = dorado_basecall.out.bam.groupTuple()
+    merge_input_ch = minimap2_align.out.bam.groupTuple()
     merge_bams(merge_input_ch)
 
     // ==============================================================================
@@ -77,29 +84,69 @@ workflow {
 ========================================================================================
 */
 
+process build_minimap2_index {
+    label 'process_medium'
+    label 'env_samtools'
+
+    input:
+    path fasta
+
+    output:
+    path "${fasta.baseName}.mmi", emit: mmi
+
+    script:
+    """
+    minimap2 -x splice -t ${task.cpus} -d ${fasta.baseName}.mmi ${fasta}
+    """
+}
+
 process dorado_basecall {
     tag "${sample_id}"
     label 'process_gpu'
-    label 'env_samtools'  // Samtools is used in the pipe
+    label 'env_samtools'  
     
     input:
     tuple val(sample_id), path(pod5_input)
 
     output:
-    tuple val(sample_id), path("chunk_${pod5_input.baseName}.bam"), emit: bam
+    // Notice we emit 'ubam' (unmapped BAM) here
+    tuple val(sample_id), path("chunk_${pod5_input.baseName}.ubam"), emit: ubam
 
     script:
     """
-    OUT_BAM="chunk_${pod5_input.baseName}.bam"
+    OUT_UBAM="chunk_${pod5_input.baseName}.ubam"
+    
+    # Run dorado without alignment flags, outputting directly to an unmapped BAM
     ${params.dorado} basecaller \\
         ${params.model} \\
         ${pod5_input} \\
         --estimate-poly-a \\
         --poly-a-config ${params.polyA} \\
-        --mm2-opts "-x splice -Y" \\
-        --reference ${params.ref} \\
-        --device "cuda:all" \\
-        | samtools sort -@ ${task.cpus} -o \$OUT_BAM -
+        --device "cuda:all" > \$OUT_UBAM
+    """
+}
+
+process minimap2_align {
+tag "${sample_id}"
+    label 'process_medium'
+    label 'env_samtools'
+
+    input:
+    tuple val(sample_id), path(ubam)
+    path mmi_index
+
+    output:
+    tuple val(sample_id), path("chunk_${ubam.baseName}.bam"), emit: bam
+
+    script:
+    """
+    OUT_BAM="chunk_${ubam.baseName}.bam"
+    
+    # 1. samtools fastq -T "*" extracts the fastq AND appends all BAM tags to the header.
+    # 2. minimap2 -y reads those tags and securely copies them into the aligned BAM output.
+    samtools fastq -@ ${task.cpus} -T "*" ${ubam} \\
+        | minimap2 -y -ax splice -Y -t ${task.cpus} ${mmi_index} - \\
+        | samtools sort -m 2G -@ ${task.cpus} -o \$OUT_BAM -
     """
 }
 
@@ -122,6 +169,9 @@ process merge_bams {
     samtools index -@ ${task.cpus} ${sample_id}.dorado.sup.sorted.bam
     """
 }
+
+
+
 
 process transcriptome_annotation_enrichment {
     publishDir "${params.outdir}/transcriptome", mode: 'copy'
