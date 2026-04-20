@@ -4,3 +4,4 @@ channels:
   - bioconda
 dependencies:
   - bioconda::samtools
+  - bioconda::minimap2
