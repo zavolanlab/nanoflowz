@@ -1,0 +1,13 @@
+name: nf-bam_processing_with_python
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.10
+  - bedtools # non-python dependency for zavolab_pyutils
+  - samtools # non-python dependency, always needed for BAM processing
+  - pip
+  - pip:
+      # This tells pip to install directly from the dev branch of the GitHub repo
+      - git+https://github.com/zavolanlab/zavolab_pyutils.git@dev
+# Cache Bust: Added April 20 14:12 to force pip pulling the latest version of zavolab_pyutils

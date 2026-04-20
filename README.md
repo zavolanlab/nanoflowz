@@ -6,15 +6,18 @@ It is tailored for GPU-accelerated basecalling, producing quality control plots,
 
 The pipeline is built using [Nextflow](https://www.nextflow.io), a workflow tool to run tasks across multiple compute infrastructures in a very portable manner. It uses Conda environments to automatically manage and isolate software dependencies.
 
+The pipeline takes advantage of several functions implemented in [zavolab_pyutils](https://github.com/zavolanlab/zavolab_pyutils/tree/dev) package.
+
 ## Pipeline Summary
 1. **GPU Basecalling (`dorado`)**: Performs basecalling and poly-A tail estimation natively on NVIDIA GPUs.
 2. **Alignment & Merging (`minimap2`)**: Maps reads to the reference genome using minimap2 and merges BAMs (e.g. technical replicates from samples).
-3. **De novo transcriptome assembly**: Enriches input transcriptome annotations based on observed read alignments
-4. **Isoform Analysis (`custom python`)**: Assigns alignments to specific transcript isoforms.
-5. **Annotating raw current data from a subsample of reads**: 
-5.1 **Signal Extraction (`pod5`)**: Subsamples reads of interest and extracts corresponding raw signal chunks from `.pod5` files.
-5.2 **Move-table Emission (`dorado`)**: Re-processes subsetted reads to emit basecaller move-tables. 
-5.3 **Dataframe Generation & QC Visualization (`seaborn`)**: Synchronizes sequence strings with raw signal variations and renders PDF plots for individual reads.
+3. **UMI deduplication (`umi_tools`, `custom python`)**: normalizing UMI lengths -> UMI- and alignment-based deduplication -> correction of NH tag and MAPQ values.
+4. **De novo transcriptome assembly (`custom python`)**: Enriches input transcriptome annotations based on observed read alignments
+5. **Isoform Analysis (`custom python`)**: Assigns alignments to specific transcript isoforms.
+6. **QC: annotating raw current data from a subsample of reads**: 
+6.1 **Signal Extraction (`pod5`)**: Subsamples reads of interest and extracts corresponding raw signal chunks from `.pod5` files.
+6.2 **Move-table Emission (`dorado`)**: Re-processes subsetted reads to emit basecaller move-tables. 
+6.3 **Dataframe Generation & QC Visualization (`seaborn`)**: Synchronizes sequence strings with raw signal variations and renders PDF plots for individual reads.
 
 ## Quick Start
 

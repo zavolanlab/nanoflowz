@@ -32,48 +32,60 @@ workflow {
     // 2.b Alignment: Pass both the unmapped BAMs and the compiled index
     minimap2_align(dorado_basecall.out.ubam, build_minimap2_index.out.mmi)
 
+    // 2c. Normalize UMIs lengths to prevent umi_tools crashes
+    normalize_umi_lengths(minimap2_align.out.bam)
+
     // 3. Merge: Combine small BAMs into a single sample-level BAM
-    merge_input_ch = minimap2_align.out.bam.groupTuple()
+    merge_input_ch = normalize_umi_lengths.out.bam.groupTuple()
     merge_bams(merge_input_ch)
+
+    // 4.a UMI Deduplication
+    umi_tools_dedup(merge_bams.out.bam.join(merge_bams.out.bai))
+
+    // 4.b Redefine NH Tags to correct for alignment filtering after UMI deduplication
+    redefine_nh_tags(umi_tools_dedup.out.bam)
 
     // ==============================================================================
     // ISOFORM ANALYSIS
     // ==============================================================================
-
-    // A. Collect all merged BAM files to build the master enriched transcriptome
-    all_bams_ch = merge_bams.out.bam.map { it[1] }.collect()
     
+    // 5.a Collect all redefined BAM files
+    all_bams_ch = redefine_nh_tags.out.bam.map { it[1] }.collect()
+    
+    // 5.b build "enriched" transcriptome annotation using all aligned reads across all input samples
     transcriptome_annotation_enrichment(
         all_bams_ch, 
         params.reference_gtf
     )
 
-    // B. Assign individual alignments for each sample to the enriched transcriptome
+    // 5.c Assign individual alignments for each sample to the transcript isoforms in enriched transcriptome
     read_to_transcript_assignment(
-        merge_bams.out.bam, 
+        redefine_nh_tags.out.bam, 
         transcriptome_annotation_enrichment.out.tsv
     )
 
     // ==============================================================================
+    // QC: Raw Current Signal visualization and annotation
+    // ==============================================================================
 
-    // 4. Selection: Pick the random Read IDs to investigate
-    extract_read_ids(merge_bams.out.bam)
+    // a. Selection: Pick the random Read IDs to investigate
+    extract_read_ids(redefine_nh_tags.out.bam)
 
-    // 5. We take all original POD5 paths and group them by sample_id
+    // b. We take all original POD5 paths and group them by sample_id
     // This allows one process to search all files at once.
     all_pod5s_per_sample = samples_ch.map { id, pod5 -> [id, pod5] }.groupTuple()
     
     filter_input_ch = extract_read_ids.out.ids_file.join(all_pod5s_per_sample)
     filter_pod5_combined(filter_input_ch)
 
-    // 6. Deep Dive: Re-run Dorado for moves on the subsampled POD5
+    // c. Deep Dive: Re-run Dorado for moves on the subsampled POD5
     dorado_emit_moves(filter_pod5_combined.out.pod5)
 
-    // 7. Prepare Data: Join the subsampled POD5 and its Move-BAM to generate CSVs
+    // d. Prepare Data: Join the subsampled POD5 and its Move-BAM to generate CSVs
     final_input_ch = filter_pod5_combined.out.pod5.join(dorado_emit_moves.out.bam)
     generate_signal_df(final_input_ch)
 
-    // 8. Visualize: Plot the squiggles for each individual read
+    // e. Visualize: Plot the squiggles for each individual read
     visualize_input = generate_signal_df.out.results.transpose()
     visualize_signal(visualize_input)
 }
@@ -127,7 +139,7 @@ process dorado_basecall {
 }
 
 process minimap2_align {
-tag "${sample_id}"
+    tag "${sample_id}"
     label 'process_medium'
     label 'env_samtools'
 
@@ -150,6 +162,31 @@ tag "${sample_id}"
     """
 }
 
+process normalize_umi_lengths {
+    tag "${sample_id} - chunk"
+    label 'process_low'
+    label 'env_bam_processing_with_python'
+
+    input:
+    tuple val(sample_id), path(bam)
+
+    output:
+    // Emits the normalized chunk
+    tuple val(sample_id), path("${bam.baseName}.normalized.bam"), emit: bam
+
+    script:
+    """
+    # Call the CLI tool from zavolab_pyutils to normalize UMI lengths
+    # This is a crucial step to prevent umi_tools from crashing due to UMIs of variable lengths.
+    normalize_umi_lengths \\
+        --input_bam ${bam} \\
+        --output_bam ${bam.baseName}.normalized.bam \\
+        --target_len 26
+        
+    # We skip samtools index here because samtools merge doesn't need it
+    """
+}
+
 process merge_bams {
     tag "${sample_id}"
     publishDir "${params.outdir}/basecalling", mode: 'copy'
@@ -160,22 +197,73 @@ process merge_bams {
     tuple val(sample_id), path(bams)
 
     output:
-    tuple val(sample_id), path("${sample_id}.dorado.sup.sorted.bam"), emit: bam
-    tuple val(sample_id), path("${sample_id}.dorado.sup.sorted.bam.bai"), emit: bai
+    tuple val(sample_id), path("${sample_id}.dorado.sorted.bam"), emit: bam
+    tuple val(sample_id), path("${sample_id}.dorado.sorted.bam.bai"), emit: bai
 
     script:
     """
-    samtools merge -@ ${task.cpus} ${sample_id}.dorado.sup.sorted.bam ${bams}
-    samtools index -@ ${task.cpus} ${sample_id}.dorado.sup.sorted.bam
+    samtools merge -@ ${task.cpus} ${sample_id}.dorado.sorted.bam ${bams}
+    samtools index -@ ${task.cpus} ${sample_id}.dorado.sorted.bam
     """
 }
 
+process umi_tools_dedup {
+    tag "${sample_id}"
+    // Deduplication holds UMIs in RAM, requires high memory
+    label 'process_high_memory_low_cpu' 
+    label 'env_umi_tools'
 
+    input:
+    tuple val(sample_id), path(bam), path(bai)
 
+    output:
+    tuple val(sample_id), path("${sample_id}.dedup.name_sorted.bam"), emit: bam
+
+    script:
+    """
+    umi_tools dedup \\
+        --extract-umi-method=tag \\
+        --umi-tag=RX \\
+        --method unique \\
+        -I ${bam} \\
+        -S unsorted_dedup.bam
+    
+    # After deduplication, we sort the BAM by NAME to prepare for downstream processing
+    samtools sort -n -@ ${task.cpus} -m 2G unsorted_dedup.bam > ${sample_id}.dedup.name_sorted.bam
+    """
+}
+
+process redefine_nh_tags {
+    tag "${sample_id}"
+    label 'process_high_memory_low_cpu'
+    label 'env_bam_processing_with_python' 
+    publishDir "${params.outdir}/map_genome_merged_UMIdedup", mode: 'copy'
+    
+    // we assume that input BAM files were name-sorted in the previous step.
+    input:
+    tuple val(sample_id), path(bam)
+
+    output:
+    tuple val(sample_id), path("${sample_id}.redefined_NH.sorted.bam"), emit: bam
+    tuple val(sample_id), path("${sample_id}.redefined_NH.sorted.bam.bai"), emit: bai
+
+    script:
+    """
+    # 1. Use custom Python script from zavolab_pyutils to correct NH tags and assign MAPQ=255 for unique alignments (as STAR aligner does).
+    # For MM reads, MAPQ=0 is assigned.
+    redefine_qual_and_NHtag \\
+        --input_bam_file ${bam} \\
+        --out_bam_file unsorted.bam
+        
+    # 2. Sort and index
+    samtools sort -@ ${task.cpus} -m 2G unsorted.bam > ${sample_id}.redefined_NH.sorted.bam
+    samtools index -@ ${task.cpus} ${sample_id}.redefined_NH.sorted.bam
+    """
+}
 
 process transcriptome_annotation_enrichment {
     publishDir "${params.outdir}/transcriptome", mode: 'copy'
-    label 'process_high_memory'
+    label 'process_high_memory_low_cpu'
     label 'env_isoform'
 
     input:
