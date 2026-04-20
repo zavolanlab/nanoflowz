@@ -8,6 +8,8 @@ dependencies:
   - samtools # non-python dependency, always needed for BAM processing
   - pip
   - pip:
-      # This tells pip to install directly from the dev branch of the GitHub repo
+      # This tells pip to install directly from the branches of the GitHub repos
       - git+https://github.com/zavolanlab/zavolab_pyutils.git@dev
-# Cache Bust: Added April 20 14:12 to force pip pulling the latest version of zavolab_pyutils
+      - git+https://github.com/zavolanlab/SCINPAS.git@making_CLI_interface_for_python_functions
+
+# Cache Bust: Added April 20 18:02 to force pip pulling the latest version of zavolab_pyutils

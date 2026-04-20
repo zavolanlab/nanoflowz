@@ -15,6 +15,7 @@ if( !params.reference_gtf ) { exit 1, "Please provide the reference GTF file wit
 // Default base directory for QC plots
 params.qc_base_dir = "${params.outdir}/QC_plots/raw_signal_annotation"
 
+
 workflow {
     
     // 0. Build the minimap2 index once from the reference FASTA
@@ -29,12 +30,35 @@ workflow {
     // 2.a Initial basecall: Parallel processing per POD5 chunk
     dorado_basecall(samples_ch)
 
-    // 2.b Alignment: Pass both the unmapped BAMs and the compiled index
-    minimap2_align(dorado_basecall.out.ubam, build_minimap2_index.out.mmi)
+    // 2a. Orient Strands (Emits both the oriented ubam and the stats tsv)
+    orient_strands(dorado_basecall.out.ubam)
 
-    // 2c. Normalize UMIs lengths to prevent umi_tools crashes
-    normalize_umi_lengths(minimap2_align.out.bam)
+    // Collect all chunk TSVs and compile them into a master QC report
+    merge_ts_stats(orient_strands.out.stats.collect())
 
+    // 2.c Alignment: Pass both the unmapped BAMs and the compiled index
+    minimap2_align(orient_strands.out.ubam, build_minimap2_index.out.mmi)
+
+    // ==============================================================================
+    // CHUNK-LEVEL PROCESSING (Highly Parallel)
+    // ==============================================================================
+
+    // 2c. Fix Softclipped Alignments
+    scinpas_fix_softclipped(minimap2_align.out.bam, params.ref)
+
+    // 2d. Extract PolyA reads
+    // scinpas_get_polyA(scinpas_fix_softclipped.out.bam, params.ref)
+
+    // 2e. Append PolyA tails to the isolated PolyA reads
+    //append_polyA_tails(scinpas_get_polyA.out.polyA_bam)
+
+    // 2f. Normalize UMIs on the appended chunks
+    normalize_umi_lengths(scinpas_fix_softclipped.out.bam)
+    
+    // ==============================================================================
+    // SAMPLE-LEVEL PROCESSING (Merged Data)
+    // ==============================================================================
+    
     // 3. Merge: Combine small BAMs into a single sample-level BAM
     merge_input_ch = normalize_umi_lengths.out.bam.groupTuple()
     merge_bams(merge_input_ch)
@@ -50,44 +74,44 @@ workflow {
     // ==============================================================================
     
     // 5.a Collect all redefined BAM files
-    all_bams_ch = redefine_nh_tags.out.bam.map { it[1] }.collect()
+    // all_bams_ch = redefine_nh_tags.out.bam.map { it[1] }.collect()
     
     // 5.b build "enriched" transcriptome annotation using all aligned reads across all input samples
-    transcriptome_annotation_enrichment(
-        all_bams_ch, 
-        params.reference_gtf
-    )
+    // transcriptome_annotation_enrichment(
+    //     all_bams_ch, 
+    //     params.reference_gtf
+    // )
 
     // 5.c Assign individual alignments for each sample to the transcript isoforms in enriched transcriptome
-    read_to_transcript_assignment(
-        redefine_nh_tags.out.bam, 
-        transcriptome_annotation_enrichment.out.tsv
-    )
+    // read_to_transcript_assignment(
+    //     redefine_nh_tags.out.bam, 
+    //     transcriptome_annotation_enrichment.out.tsv
+    // )
 
     // ==============================================================================
     // QC: Raw Current Signal visualization and annotation
     // ==============================================================================
 
     // a. Selection: Pick the random Read IDs to investigate
-    extract_read_ids(redefine_nh_tags.out.bam)
+    // extract_read_ids(redefine_nh_tags.out.bam)
 
-    // b. We take all original POD5 paths and group them by sample_id
-    // This allows one process to search all files at once.
-    all_pod5s_per_sample = samples_ch.map { id, pod5 -> [id, pod5] }.groupTuple()
+    // // b. We take all original POD5 paths and group them by sample_id
+    // // This allows one process to search all files at once.
+    // all_pod5s_per_sample = samples_ch.map { id, pod5 -> [id, pod5] }.groupTuple()
     
-    filter_input_ch = extract_read_ids.out.ids_file.join(all_pod5s_per_sample)
-    filter_pod5_combined(filter_input_ch)
+    // filter_input_ch = extract_read_ids.out.ids_file.join(all_pod5s_per_sample)
+    // filter_pod5_combined(filter_input_ch)
 
-    // c. Deep Dive: Re-run Dorado for moves on the subsampled POD5
-    dorado_emit_moves(filter_pod5_combined.out.pod5)
+    // // c. Deep Dive: Re-run Dorado for moves on the subsampled POD5
+    // dorado_emit_moves(filter_pod5_combined.out.pod5)
 
-    // d. Prepare Data: Join the subsampled POD5 and its Move-BAM to generate CSVs
-    final_input_ch = filter_pod5_combined.out.pod5.join(dorado_emit_moves.out.bam)
-    generate_signal_df(final_input_ch)
+    // // d. Prepare Data: Join the subsampled POD5 and its Move-BAM to generate CSVs
+    // final_input_ch = filter_pod5_combined.out.pod5.join(dorado_emit_moves.out.bam)
+    // generate_signal_df(final_input_ch)
 
-    // e. Visualize: Plot the squiggles for each individual read
-    visualize_input = generate_signal_df.out.results.transpose()
-    visualize_signal(visualize_input)
+    // // e. Visualize: Plot the squiggles for each individual read
+    // visualize_input = generate_signal_df.out.results.transpose()
+    // visualize_signal(visualize_input)
 }
 
 /*
@@ -138,6 +162,50 @@ process dorado_basecall {
     """
 }
 
+process orient_strands {
+    tag "${sample_id} - chunk"
+    label 'process_low'
+    label 'env_bam_processing_with_python' 
+
+    input:
+    tuple val(sample_id), path(ubam)
+
+    output:
+    tuple val(sample_id), path("${ubam.baseName}.oriented.ubam"), emit: ubam
+    path "${ubam.baseName}.ts_stats.tsv", emit: stats
+
+    script:
+    """
+    orient_reads.py \\
+        --input_bam ${ubam} \\
+        --output_bam ${ubam.baseName}.oriented.ubam \\
+        --stats_tsv ${ubam.baseName}.ts_stats.tsv \\
+        --sample_id ${sample_id}
+    """
+}
+
+process merge_ts_stats {
+    publishDir "${params.qc_base_dir}", mode: 'copy'
+    label 'process_single'
+    
+    input:
+    path tsv_files
+    
+    output:
+    path "master_TS_orientation_stats.tsv"
+    
+    script:
+    """
+    # 1. Extract the header from the first TSV file
+    head -n 1 \$(ls ${tsv_files} | head -n 1) > master_TS_orientation_stats.tsv
+    
+    # 2. Append the data from all chunk TSVs (skipping the header line in each)
+    for file in ${tsv_files}; do
+        tail -n +2 \$file >> master_TS_orientation_stats.tsv
+    done
+    """
+}
+
 process minimap2_align {
     tag "${sample_id}"
     label 'process_medium'
@@ -159,6 +227,111 @@ process minimap2_align {
     samtools fastq -@ ${task.cpus} -T "*" ${ubam} \\
         | minimap2 -y -ax splice -Y -t ${task.cpus} ${mmi_index} - \\
         | samtools sort -m 2G -@ ${task.cpus} -o \$OUT_BAM -
+    """
+}
+
+process scinpas_fix_softclipped {
+    tag "${sample_id} - chunk"
+    label 'process_medium_low_cpu'
+    label 'env_bam_processing_with_python'
+
+    input:
+    tuple val(sample_id), path(bam)
+    path fasta
+
+    output:
+    tuple val(sample_id), path("${bam.baseName}.fixed.bam"), emit: bam
+    path "${bam.baseName}.fix_stats.csv", emit: csv
+
+    script:
+    """
+    # Create index for pysam
+    samtools index -@ ${task.cpus} ${bam}
+    
+    scinpas_fix_softclipped \\
+        --bam_file ${bam} \\
+        --fasta ${fasta} \\
+        --bam_out unsorted_fixed.bam \\
+        --csv_out ${bam.baseName}.fix_stats.csv \\
+        --exact_out \\
+        --one_based_tags
+        
+    samtools sort -@ ${task.cpus} -m 2G unsorted_fixed.bam > ${bam.baseName}.fixed.bam
+    rm unsorted_fixed.bam
+    """
+}
+
+process scinpas_get_polyA {
+    tag "${sample_id} - chunk"
+    label 'process_medium_low_cpu'
+    label 'env_bam_processing_with_python'
+
+    input:
+    tuple val(sample_id), path(bam)
+    path fasta
+
+    output:
+    tuple val(sample_id), path("${bam.baseName}.polyA.bam"), emit: polyA_bam
+    tuple val(sample_id), path("${bam.baseName}.non_polyA.bam"), emit: non_polyA_bam
+
+    script:
+    """
+    samtools index -@ ${task.cpus} ${bam}
+    
+    scinpas_get_polyA \\
+        --bam_input ${bam} \\
+        --o_polyA ${bam.baseName}.polyA.bam \\
+        --o_nonpolyA ${bam.baseName}.non_polyA.bam \\
+        --o_low_q_polyA ${bam.baseName}.lowQ_polyA.bam \\
+        --fasta ${fasta} \\
+        --percentage_threshold 80 \\
+        --length_threshold 8 \\
+        --use_fc 1 \\
+        --exact_out
+    """
+}
+
+process scinpas_get_unique_cs {
+    tag "${sample_id} - chunk"
+    label 'process_low'
+    label 'env_bam_processing_with_python'
+
+    input:
+    tuple val(sample_id), path(polyA_bam)
+
+    output:
+    tuple val(sample_id), path("${polyA_bam.baseName}.cleavage_sites.bed"), emit: bed
+
+    script:
+    """
+    samtools index -@ ${task.cpus} ${polyA_bam}
+    
+    scinpas_get_unique_cs \\
+        --bam ${polyA_bam} \\
+        --bed_out ${polyA_bam.baseName}.cleavage_sites.bed \\
+        --use_fc 1 \\
+        --sample_name ${sample_id} \\
+        --exact_out
+    """
+}
+
+process append_polyA_tails {
+    tag "${sample_id} - chunk"
+    label 'process_medium'
+    label 'env_bam_processing_with_python'
+
+    input:
+    tuple val(sample_id), path(polyA_bam)
+
+    output:
+    tuple val(sample_id), path("${polyA_bam.baseName}.pA_appended.bam"), emit: bam
+
+    script:
+    """
+    # Runs the custom script placed in nanoflowz/bin/
+    append_polyA_tail.py \\
+        --input_bam_file ${polyA_bam} \\
+        --output_bam_file ${polyA_bam.baseName}.pA_appended.bam
     """
 }
 
@@ -230,6 +403,8 @@ process umi_tools_dedup {
     
     # After deduplication, we sort the BAM by NAME to prepare for downstream processing
     samtools sort -n -@ ${task.cpus} -m 2G unsorted_dedup.bam > ${sample_id}.dedup.name_sorted.bam
+    
+    rm unsorted_dedup.bam
     """
 }
 
@@ -258,6 +433,9 @@ process redefine_nh_tags {
     # 2. Sort and index
     samtools sort -@ ${task.cpus} -m 2G unsorted.bam > ${sample_id}.redefined_NH.sorted.bam
     samtools index -@ ${task.cpus} ${sample_id}.redefined_NH.sorted.bam
+    
+    # 3. Clean up intermediate file
+    rm unsorted.bam
     """
 }
 
