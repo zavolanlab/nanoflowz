@@ -10,6 +10,7 @@ import HTSeq
 import ast
 import gzip
 import logging
+from collections import defaultdict
 from argparse import ArgumentParser, RawTextHelpFormatter
 
 # Configure logging
@@ -94,7 +95,7 @@ def main():
                     for cigar_elem in algn.cigar:
                         if cigar_elem.type == 'N': 
                             reference_region = cigar_elem.ref_iv
-                            introns_list.append((reference_region.start, reference_region.end + 1))
+                            introns_list.append((reference_region.start, reference_region.end))
                 
                 three_prime = algn.iv.end if algn.iv.strand == "+" else algn.iv.start
                 read_coords.append({
@@ -174,7 +175,19 @@ def main():
         logging.info("Loading enriched reference for assignment...")
         # Note: In assign mode, input_gtf_file should be the .tsv produced by 'enrich'
         master_ref = pd.read_csv(args.input_gtf_file, sep='\t')
-        isoform_lookup = dict(zip(zip(master_ref.chrom, master_ref.strand, master_ref.introns), master_ref.transcript_id))
+
+        # Derive the representative 3' end for each isoform from its coordinates.
+        # Two isoforms may share the same intron chain but differ only in their 3' end
+        # (different cluster_id). A plain dict keyed on (chrom, strand, introns) would
+        # silently overwrite duplicates, so we store all candidates and resolve per-read
+        # by picking the closest 3' end.
+        master_ref['three_prime'] = master_ref.apply(
+            lambda r: r['end'] if r['strand'] == '+' else r['start'], axis=1
+        )
+        isoform_candidates = defaultdict(list)
+        for _, row in master_ref.iterrows():
+            key = (row['chrom'], row['strand'], row['introns'])
+            isoform_candidates[key].append((row['three_prime'], row['transcript_id']))
         
         assigned_count = 0
         unassigned_count = 0
@@ -204,11 +217,18 @@ def main():
                         for cigar_elem in algn.cigar:
                             if cigar_elem.type == 'N':
                                 reference_region = cigar_elem.ref_iv
-                                introns_list.append((reference_region.start, reference_region.end + 1))
+                                introns_list.append((reference_region.start, reference_region.end))
                     
                     introns_str = str(tuple(introns_list))
                     query_key = (algn.iv.chrom, algn.iv.strand, introns_str)
-                    transcript_id = isoform_lookup.get(query_key, np.nan)
+                    candidate_list = isoform_candidates.get(query_key)
+                    if candidate_list is None:
+                        transcript_id = np.nan
+                    else:
+                        # Among all isoforms sharing this intron chain, pick the one
+                        # whose 3' end is closest to this alignment's 3' end.
+                        read_three_prime = algn.iv.end if algn.iv.strand == "+" else algn.iv.start
+                        transcript_id = min(candidate_list, key=lambda x: abs(x[0] - read_three_prime))[1]
 
                     row_data = [
                         str(algn_counter), str(algn.read.name), str(transcript_id),
