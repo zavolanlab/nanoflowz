@@ -4,12 +4,15 @@ channels:
   - bioconda
 dependencies:
   - python=3.10
-  - bedtools # non-python dependency for zavolab_pyutils
-  - samtools # non-python dependency, always needed for BAM processing
+  - bioconda::bedtools # non-python dependency for zavolab_pyutils
+  - bioconda::samtools # non-python dependency, always needed for BAM processing
+  - conda-forge::pigz
+  - bioconda::ucsc-wigtobigwig
+  - bioconda::ucsc-bedgraphtobigwig
   - pip
   - pip:
       # This tells pip to install directly from the branches of the GitHub repos
       - git+https://github.com/zavolanlab/zavolab_pyutils.git@dev
       - git+https://github.com/zavolanlab/SCINPAS.git@making_CLI_interface_for_python_functions
 
-# Cache Bust: Added April 20 18:02 to force pip pulling the latest version of zavolab_pyutils
+# Cache Bust: Added April 21 14:39 to force pip pulling the latest version of zavolab_pyutils

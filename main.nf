@@ -15,7 +15,6 @@ if( !params.reference_gtf ) { exit 1, "Please provide the reference GTF file wit
 // Default base directory for QC plots
 params.qc_base_dir = "${params.outdir}/QC_plots/raw_signal_annotation"
 
-
 workflow {
     
     // 0. Build the minimap2 index once from the reference FASTA
@@ -30,7 +29,7 @@ workflow {
     // 2.a Initial basecall: Parallel processing per POD5 chunk
     dorado_basecall(samples_ch)
 
-    // 2a. Orient Strands (Emits both the oriented ubam and the stats tsv)
+    // 2.b. Orient Strands (Emits both the oriented ubam and the stats tsv)
     orient_strands(dorado_basecall.out.ubam)
 
     // Collect all chunk TSVs and compile them into a master QC report
@@ -43,31 +42,52 @@ workflow {
     // CHUNK-LEVEL PROCESSING (Highly Parallel)
     // ==============================================================================
 
-    // 2c. Fix Softclipped Alignments
-    scinpas_fix_softclipped(minimap2_align.out.bam, params.ref)
+    // 2.d. Normalize UMIs on the appended chunks
+    normalize_umi_lengths(minimap2_align.out.bam)
 
-    // 2d. Extract PolyA reads
-    // scinpas_get_polyA(scinpas_fix_softclipped.out.bam, params.ref)
+    // 2.e. Fix Softclipped Alignments
+    scinpas_fix_softclipped(normalize_umi_lengths.out.bam, params.ref)
 
-    // 2e. Append PolyA tails to the isolated PolyA reads
-    //append_polyA_tails(scinpas_get_polyA.out.polyA_bam)
+    // 2.f. Extract PolyA reads
+    scinpas_get_polyA(scinpas_fix_softclipped.out.bam, params.ref)
 
-    // 2f. Normalize UMIs on the appended chunks
-    normalize_umi_lengths(scinpas_fix_softclipped.out.bam)
+    // Merge the PolyA stats into a master QC report
+    merge_polyA_stats(scinpas_get_polyA.out.stats.collect())
+
+    // 2.g. Append PolyA tails based on `pt` tags
+    append_polyA_tails(scinpas_get_polyA.out.polyA_bam)
+    
+    // Merge the append stats into a master QC report
+    merge_pt_stats(append_polyA_tails.out.stats.collect())    
     
     // ==============================================================================
     // SAMPLE-LEVEL PROCESSING (Merged Data)
     // ==============================================================================
     
     // 3. Merge: Combine small BAMs into a single sample-level BAM
-    merge_input_ch = normalize_umi_lengths.out.bam.groupTuple()
+    merge_input_ch = append_polyA_tails.out.bam.groupTuple()
     merge_bams(merge_input_ch)
+    
+    // Optional: Also merge the non-polyA BAMs for inspection
+    if (params.merge_non_polyA) {
+        merge_non_polyA_input_ch = scinpas_get_polyA.out.non_polyA_bam.groupTuple()
+        merge_non_polyA_bams(merge_non_polyA_input_ch)
+    }
+
+    // Optional merge of skipped pt reads
+    if (params.merge_skipped_pt) {
+        merge_skipped_pt_input_ch = append_polyA_tails.out.skipped_bam.groupTuple()
+        merge_skipped_pt_bams(merge_skipped_pt_input_ch)
+    }
 
     // 4.a UMI Deduplication
     umi_tools_dedup(merge_bams.out.bam.join(merge_bams.out.bai))
 
     // 4.b Redefine NH Tags to correct for alignment filtering after UMI deduplication
     redefine_nh_tags(umi_tools_dedup.out.bam)
+
+    // 4.c Generate BigWigs for Cleavage Sites using the custom scripts
+    make_bigwig_for_cleavage_sites(redefine_nh_tags.out.bam.join(redefine_nh_tags.out.bai), params.ref)
 
     // ==============================================================================
     // ISOFORM ANALYSIS
@@ -164,7 +184,7 @@ process dorado_basecall {
 
 process orient_strands {
     tag "${sample_id} - chunk"
-    label 'process_low'
+    label 'process_medium_low_cpu'
     label 'env_bam_processing_with_python' 
 
     input:
@@ -180,12 +200,14 @@ process orient_strands {
         --input_bam ${ubam} \\
         --output_bam ${ubam.baseName}.oriented.ubam \\
         --stats_tsv ${ubam.baseName}.ts_stats.tsv \\
-        --sample_id ${sample_id}
+        --sample_id ${sample_id} \\
+        --tag_basecaller_ts ${params.tag_basecaller_ts} \\
+        --tag_original_ts ${params.tag_original_ts}
     """
 }
 
 process merge_ts_stats {
-    publishDir "${params.qc_base_dir}", mode: 'copy'
+    publishDir "${params.outdir}/QC", mode: 'copy'
     label 'process_single'
     
     input:
@@ -245,7 +267,6 @@ process scinpas_fix_softclipped {
 
     script:
     """
-    # Create index for pysam
     samtools index -@ ${task.cpus} ${bam}
     
     scinpas_fix_softclipped \\
@@ -254,7 +275,9 @@ process scinpas_fix_softclipped {
         --bam_out unsorted_fixed.bam \\
         --csv_out ${bam.baseName}.fix_stats.csv \\
         --exact_out \\
-        --one_based_tags
+        --one_based_tags \\
+        --tag_orig_cs ${params.tag_orig_cs} \\
+        --tag_fixed_cs ${params.tag_fixed_cs}
         
     samtools sort -@ ${task.cpus} -m 2G unsorted_fixed.bam > ${bam.baseName}.fixed.bam
     rm unsorted_fixed.bam
@@ -273,6 +296,7 @@ process scinpas_get_polyA {
     output:
     tuple val(sample_id), path("${bam.baseName}.polyA.bam"), emit: polyA_bam
     tuple val(sample_id), path("${bam.baseName}.non_polyA.bam"), emit: non_polyA_bam
+    path "${bam.baseName}.polyA_stats.tsv", emit: stats
 
     script:
     """
@@ -287,7 +311,36 @@ process scinpas_get_polyA {
         --percentage_threshold 80 \\
         --length_threshold 8 \\
         --use_fc 1 \\
-        --exact_out
+        --exact_out \\
+        --stats_tsv ${bam.baseName}.polyA_stats.tsv \\
+        --sample_id ${sample_id} \\
+        --min_phred ${params.min_phred_score} \\
+        --tag_phred_mapped ${params.tag_phred_mapped} \\
+        --tag_phred_softclipped ${params.tag_phred_softclipped} \\
+        --tag_orig_cs ${params.tag_orig_cs} \\
+        --tag_fixed_cs ${params.tag_fixed_cs}
+    """
+}
+
+process merge_polyA_stats {
+    publishDir "${params.outdir}/QC", mode: 'copy'
+    label 'process_single'
+    
+    input:
+    path tsv_files
+    
+    output:
+    path "master_polyA_stats.tsv"
+    
+    script:
+    """
+    # Extract header from the first file
+    head -n 1 \$(ls ${tsv_files} | head -n 1) > master_polyA_stats.tsv
+    
+    # Append the body of all chunk TSVs
+    for file in ${tsv_files}; do
+        tail -n +2 \$file >> master_polyA_stats.tsv
+    done
     """
 }
 
@@ -311,13 +364,15 @@ process scinpas_get_unique_cs {
         --bed_out ${polyA_bam.baseName}.cleavage_sites.bed \\
         --use_fc 1 \\
         --sample_name ${sample_id} \\
-        --exact_out
+        --exact_out \\
+        --tag_orig_cs ${params.tag_orig_cs} \\
+        --tag_fixed_cs ${params.tag_fixed_cs}
     """
 }
 
 process append_polyA_tails {
     tag "${sample_id} - chunk"
-    label 'process_medium'
+    label 'process_medium_low_cpu'
     label 'env_bam_processing_with_python'
 
     input:
@@ -325,13 +380,38 @@ process append_polyA_tails {
 
     output:
     tuple val(sample_id), path("${polyA_bam.baseName}.pA_appended.bam"), emit: bam
+    tuple val(sample_id), path("${polyA_bam.baseName}.pA_skipped.bam"), emit: skipped_bam
+    path "${polyA_bam.baseName}.pt_stats.tsv", emit: stats
 
     script:
     """
-    # Runs the custom script placed in nanoflowz/bin/
     append_polyA_tail.py \\
-        --input_bam_file ${polyA_bam} \\
-        --output_bam_file ${polyA_bam.baseName}.pA_appended.bam
+        --input_bam ${polyA_bam} \\
+        --output_appended_bam ${polyA_bam.baseName}.pA_appended.bam \\
+        --output_skipped_bam ${polyA_bam.baseName}.pA_skipped.bam \\
+        --stats_tsv ${polyA_bam.baseName}.pt_stats.tsv \\
+        --sample_id ${sample_id} \\
+        --tag_orig_cs ${params.tag_orig_cs} \\
+        --tag_fixed_cs ${params.tag_fixed_cs}
+    """
+}
+
+process merge_pt_stats {
+    publishDir "${params.outdir}/QC", mode: 'copy'
+    label 'process_single'
+    
+    input:
+    path tsv_files
+    
+    output:
+    path "master_pt_append_stats.tsv"
+    
+    script:
+    """
+    head -n 1 \$(ls ${tsv_files} | head -n 1) > master_pt_append_stats.tsv
+    for file in ${tsv_files}; do
+        tail -n +2 \$file >> master_pt_append_stats.tsv
+    done
     """
 }
 
@@ -377,6 +457,49 @@ process merge_bams {
     """
     samtools merge -@ ${task.cpus} ${sample_id}.dorado.sorted.bam ${bams}
     samtools index -@ ${task.cpus} ${sample_id}.dorado.sorted.bam
+    """
+}
+
+process merge_non_polyA_bams {
+    tag "${sample_id}"
+    publishDir "${params.outdir}/QC/non_polyA_alignments", mode: 'copy'
+    label 'process_medium'
+    label 'env_samtools'
+
+    input:
+    tuple val(sample_id), path(bams)
+
+    output:
+    tuple val(sample_id), path("${sample_id}.non_polyA.sorted.bam"), emit: bam
+    tuple val(sample_id), path("${sample_id}.non_polyA.sorted.bam.bai"), emit: bai
+
+    script:
+    """
+    # Merge the chunked non-polyA BAMs into a sample-level BAM
+    samtools merge -@ ${task.cpus} ${sample_id}.non_polyA.sorted.bam ${bams}
+    
+    # Index it so it can be immediately loaded into IGV
+    samtools index -@ ${task.cpus} ${sample_id}.non_polyA.sorted.bam
+    """
+}
+
+process merge_skipped_pt_bams {
+    tag "${sample_id}"
+    publishDir "${params.outdir}/QC/skipped_pt_alignments", mode: 'copy'
+    label 'process_medium'
+    label 'env_samtools'
+
+    input:
+    tuple val(sample_id), path(bams)
+
+    output:
+    tuple val(sample_id), path("${sample_id}.skipped_pt.sorted.bam"), emit: bam
+    tuple val(sample_id), path("${sample_id}.skipped_pt.sorted.bam.bai"), emit: bai
+
+    script:
+    """
+    samtools merge -@ ${task.cpus} ${sample_id}.skipped_pt.sorted.bam ${bams}
+    samtools index -@ ${task.cpus} ${sample_id}.skipped_pt.sorted.bam
     """
 }
 
@@ -438,6 +561,57 @@ process redefine_nh_tags {
     rm unsorted.bam
     """
 }
+
+process make_bigwig_for_cleavage_sites {
+    tag "${sample_id}"
+    publishDir "${params.outdir}/cleavage_sites_bigwigs", mode: 'copy'
+    label 'process_medium_low_cpu'
+    label 'env_bam_processing_with_python' 
+
+    input:
+    tuple val(sample_id), path(bam), path(bai)
+    path fasta
+
+    output:
+    tuple val(sample_id), path("${sample_id}.plus.bigwig"), emit: bw_plus
+    tuple val(sample_id), path("${sample_id}.minus.bigwig"), emit: bw_minus
+    tuple val(sample_id), path("${sample_id}.read_sum.tsv"), emit: tsv
+
+    script:
+    """
+    # 1. Create genome index if not already present
+    samtools faidx ${fasta}
+    
+    # 2. Extract Cleavage Sites using the dedicated Python script
+    extract_cs_bigwig.py \\
+        --bam_in ${bam} \\
+        --bed_out cs.bed \\
+        --tag ${params.tag_quantification_cs}
+
+    # 3. Sort the extracted BED
+    sort -k1,1 -k2,2n cs.bed > cs.sorted.bed
+
+    # 4. Generate BedGraphs per strand
+    awk '\$6 == "+"' cs.sorted.bed | bedtools genomecov -i stdin -g ${fasta}.fai -bg > plus.bg
+    awk '\$6 == "-"' cs.sorted.bed | bedtools genomecov -i stdin -g ${fasta}.fai -bg > minus.bg
+
+    # 5. Sort BedGraphs (bedGraphToBigWig strictly requires coordinate-sorted input)
+    sort -k1,1 -k2,2n plus.bg > plus.sorted.bg
+    sort -k1,1 -k2,2n minus.bg > minus.sorted.bg
+
+    # 6. Convert to BigWig
+    bedGraphToBigWig plus.sorted.bg ${fasta}.fai ${sample_id}.plus.bigwig
+    bedGraphToBigWig minus.sorted.bg ${fasta}.fai ${sample_id}.minus.bigwig
+
+    # 7. Generate Summary TSV (chr, start, end, strand, count)
+    # bedtools groupby groups by chrom, start, end, strand and counts the read names
+    bedtools groupby -i cs.sorted.bed -g 1,2,3,6 -c 4 -o count > ${sample_id}.read_sum.tsv
+    
+    # Clean up intermediate large files
+    rm cs.bed plus.bg minus.bg plus.sorted.bg minus.sorted.bg
+    """
+}
+
 
 process transcriptome_annotation_enrichment {
     publishDir "${params.outdir}/transcriptome", mode: 'copy'
