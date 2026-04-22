@@ -600,12 +600,16 @@ process make_bigwig_for_cleavage_sites {
     sort -k1,1 -k2,2n minus.bg > minus.sorted.bg
 
     # 6. Convert to BigWig
-    bedGraphToBigWig plus.sorted.bg ${fasta}.fai ${sample_id}.plus.bigwig
-    bedGraphToBigWig minus.sorted.bg ${fasta}.fai ${sample_id}.minus.bigwig
+    [ -s plus.sorted.bg ]  && bedGraphToBigWig plus.sorted.bg  ${fasta}.fai ${sample_id}.plus.bigwig  || touch ${sample_id}.plus.bigwig
+    [ -s minus.sorted.bg ] && bedGraphToBigWig minus.sorted.bg ${fasta}.fai ${sample_id}.minus.bigwig || touch ${sample_id}.minus.bigwig
 
     # 7. Generate Summary TSV (chr, start, end, strand, count)
     # bedtools groupby groups by chrom, start, end, strand and counts the read names
-    bedtools groupby -i cs.sorted.bed -g 1,2,3,6 -c 4 -o count > ${sample_id}.read_sum.tsv
+    if [ -s cs.sorted.bed ]; then
+        bedtools groupby -i cs.sorted.bed -g 1,2,3,6 -c 4 -o count > ${sample_id}.read_sum.tsv
+    else
+        touch ${sample_id}.read_sum.tsv
+    fi
     
     # Clean up intermediate large files
     rm cs.bed plus.bg minus.bg plus.sorted.bg minus.sorted.bg
