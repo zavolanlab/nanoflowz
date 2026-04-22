@@ -16,8 +16,13 @@ if( !params.reference_gtf ) { exit 1, "Please provide the reference GTF file wit
 params.qc_base_dir = "${params.outdir}/QC_plots/raw_signal_annotation"
 
 workflow {
-    
-    // 0. Build the minimap2 index once from the reference FASTA
+
+    // 0a. Optional: verify that the GTF and genome FASTA are compatible before doing any real work
+    if (params.check_gtf_compatibility) {
+        check_gtf_genome_compatibility(params.ref, params.reference_gtf)
+    }
+
+    // 0b. Build the minimap2 index once from the reference FASTA
     build_minimap2_index(params.ref)
 
     // 1. Initial Data Ingest: Create a stream of (sample_id, pod5_file)
@@ -612,6 +617,55 @@ process make_bigwig_for_cleavage_sites {
     """
 }
 
+
+process check_gtf_genome_compatibility {
+    label 'process_single'
+    label 'env_samtools'
+
+    input:
+    path fasta
+    path gtf
+
+    output:
+    path "compatibility_check.txt", emit: report
+
+    script:
+    """
+    # Index the genome FASTA and extract chromosome names from column 1 of the .fai
+    samtools faidx ${fasta}
+    cut -f1 ${fasta}.fai | sort > genome_chroms.txt
+    TOTAL_GENOME=\$(wc -l < genome_chroms.txt)
+
+    # Extract unique chromosome names from column 1 of the GTF (skip comment lines)
+    grep -v '^#' ${gtf} | cut -f1 | sort -u > gtf_chroms.txt
+
+    # Count how many genome chromosomes appear in the GTF
+    FOUND_IN_GTF=\$(comm -12 genome_chroms.txt gtf_chroms.txt | wc -l)
+
+    {
+        echo "Genome chromosomes (from .fai):    \$TOTAL_GENOME"
+        echo "Genome chromosomes found in GTF:   \$FOUND_IN_GTF"
+    } | tee compatibility_check.txt
+
+    if [ "\$TOTAL_GENOME" -eq 0 ]; then
+        echo "ERROR: No chromosomes found in genome FASTA index." >&2
+        exit 1
+    fi
+
+    # Require at least 50% of genome chromosomes to be present in the GTF.
+    # Uses integer arithmetic: found*100 < total*50  ↔  found/total < 0.5
+    PCT=\$(( FOUND_IN_GTF * 100 / TOTAL_GENOME ))
+    if [ \$(( FOUND_IN_GTF * 100 )) -lt \$(( TOTAL_GENOME * 50 )) ]; then
+        echo "ERROR: Only \${FOUND_IN_GTF}/\${TOTAL_GENOME} genome chromosomes (\${PCT}%) are present in the GTF." >&2
+        echo "At least 50% of genome chromosomes must appear in the GTF." >&2
+        echo "Please verify that the genome FASTA and GTF correspond to the same reference assembly," >&2
+        echo "or set '--check_gtf_compatibility false' to skip this check." >&2
+        exit 1
+    fi
+
+    echo "OK: \${FOUND_IN_GTF}/\${TOTAL_GENOME} genome chromosomes (\${PCT}%) present in GTF." | tee -a compatibility_check.txt
+    """
+}
 
 process transcriptome_annotation_enrichment {
     publishDir "${params.outdir}/transcriptome", mode: 'copy'
