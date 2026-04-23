@@ -37,7 +37,7 @@ workflow {
 
     // 2.c Alignment: Pass both the unmapped BAMs and the compiled index
     minimap2_align(orient_strands.out.ubam, build_minimap2_index.out.mmi)
-
+    
     // ==============================================================================
     // CHUNK-LEVEL PROCESSING (Highly Parallel)
     // ==============================================================================
@@ -47,7 +47,7 @@ workflow {
 
     // 2.e. Fix Softclipped Alignments
     scinpas_fix_softclipped(normalize_umi_lengths.out.bam, params.ref)
-
+    
     // 2.f. Extract PolyA reads
     scinpas_get_polyA(scinpas_fix_softclipped.out.bam, params.ref)
 
@@ -85,9 +85,30 @@ workflow {
 
     // 4.b Redefine NH Tags to correct for alignment filtering after UMI deduplication
     redefine_nh_tags(umi_tools_dedup.out.bam)
-
+    
     // 4.c Generate BigWigs for Cleavage Sites using the custom scripts
     make_bigwig_for_cleavage_sites(redefine_nh_tags.out.bam.join(redefine_nh_tags.out.bai), params.ref)
+
+    // ==============================================================================
+    // QC: MAPPING STATISTICS
+    // ==============================================================================
+    
+    ch_to_count = dorado_basecall.out.ubam.map{ id, bam -> [id, bam, "01_dorado_basecall"] }
+        .mix(
+            orient_strands.out.ubam.map{ id, bam -> [id, bam, "02_reverse_complemented_backward_oriented_reads"] },
+            minimap2_align.out.bam.map{ id, bam -> [id, bam, "03_aligned_with_minimap2"] },
+            normalize_umi_lengths.out.bam.map{ id, bam -> [id, bam, "04_normalized_umi_lengths"] },
+            scinpas_fix_softclipped.out.bam.map{ id, bam -> [id, bam, "05_fixed_softclipped_alignments"] },
+            scinpas_get_polyA.out.polyA_bam.map{ id, bam -> [id, bam, "06_extracted_polyA_reads"] },
+            append_polyA_tails.out.bam.map{ id, bam -> [id, bam, "07_appended_polyA_tails"] },
+            umi_tools_dedup.out.bam.map{ id, bam -> [id, bam, "08_umi_deduped"] },
+            redefine_nh_tags.out.bam.map{ id, bam -> [id, bam, "09_nh_tags_and_MAPQ_redefined"] }
+        )
+
+    // Call count_reads
+    all_read_counts = count_reads(ch_to_count)
+
+    aggregate_read_stats(all_read_counts.collect())
 
     // ==============================================================================
     // ISOFORM ANALYSIS
@@ -247,7 +268,7 @@ process minimap2_align {
     # 1. samtools fastq -T "*" extracts the fastq AND appends all BAM tags to the header.
     # 2. minimap2 -y reads those tags and securely copies them into the aligned BAM output.
     samtools fastq -@ ${task.cpus} -T "*" ${ubam} \\
-        | minimap2 -y -ax splice -Y -t ${task.cpus} ${mmi_index} - \\
+        | minimap2 -y -ax splice:hq --secondary=no -Y -t ${task.cpus} ${mmi_index} - \\
         | samtools sort -m 2G -@ ${task.cpus} -o \$OUT_BAM -
     """
 }
@@ -561,6 +582,41 @@ process redefine_nh_tags {
     rm unsorted.bam
     """
 }
+
+process count_reads {
+    tag "${sample_id} - ${step_name}"
+    label 'process_medium'
+    label 'env_samtools'
+
+    input:
+    tuple val(sample_id), path(bam), val(step_name)
+
+    output:
+    path "${bam.baseName}.${step_name}.tsv", emit: tsv
+
+    script:
+    """
+    count_reads.sh ${sample_id} ${step_name} ${bam} ${task.cpus} ${bam.baseName}.${step_name}.tsv
+    """
+}
+
+process aggregate_read_stats {
+    publishDir "${params.outdir}/QC_reports", mode: 'copy'
+    label 'process_single'
+    label 'env_bam_processing_with_python'
+    
+    input:
+    path tsv_files
+    
+    output:
+    path "master_read_tracking_stats.tsv"
+    
+    script:
+    """
+    aggregate_read_stats.py --input ${tsv_files} --output master_read_tracking_stats.tsv
+    """
+}
+
 
 process make_bigwig_for_cleavage_sites {
     tag "${sample_id}"
