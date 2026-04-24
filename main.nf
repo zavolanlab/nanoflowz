@@ -759,8 +759,8 @@ process make_bigwig_for_polya_length {
     path fasta
 
     output:
-    tuple val(sample_id), path("${sample_id}.polya_${params.polya_metric}.plus.bigwig"), emit: bw_plus
-    tuple val(sample_id), path("${sample_id}.polya_${params.polya_metric}.minus.bigwig"), emit: bw_minus
+    tuple val(sample_id), path("${sample_id}.polya_${params.polya_tail_metric}.plus.bigwig"), emit: bw_plus
+    tuple val(sample_id), path("${sample_id}.polya_${params.polya_tail_metric}.minus.bigwig"), emit: bw_minus
 
     script:
     """
@@ -770,7 +770,7 @@ process make_bigwig_for_polya_length {
     compute_polya_bedgraphs.py \\
         --bam_in ${bam} \\
         --tag_cs ${params.tag_quantification_cs} \\
-        --metric ${params.polya_metric} \\
+        --metric ${params.polya_tail_metric} \\
         --include_multimappers ${params.include_multimappers}
 
     # Sort BedGraphs
@@ -778,8 +778,8 @@ process make_bigwig_for_polya_length {
     sort -k1,1 -k2,2n minus.bg > minus.sorted.bg
 
     # Convert to BigWig
-    bedGraphToBigWig plus.sorted.bg ${fasta}.fai ${sample_id}.polya_${params.polya_metric}.plus.bigwig
-    bedGraphToBigWig minus.sorted.bg ${fasta}.fai ${sample_id}.polya_${params.polya_metric}.minus.bigwig
+    bedGraphToBigWig plus.sorted.bg ${fasta}.fai ${sample_id}.polya_${params.polya_tail_metric}.plus.bigwig
+    bedGraphToBigWig minus.sorted.bg ${fasta}.fai ${sample_id}.polya_${params.polya_tail_metric}.minus.bigwig
     
     rm plus.bg minus.bg plus.sorted.bg minus.sorted.bg
     """
