@@ -94,6 +94,13 @@ workflow {
     // 4.c Generate BigWigs for Cleavage Sites using the custom scripts
     make_bigwig_for_cleavage_sites(redefine_nh_tags.out.bam.join(redefine_nh_tags.out.bai), params.ref)
 
+    // Motif Meta-plots
+    // Join the plus and minus bigwigs by sample_id
+    bw_input_ch = make_bigwig_for_cleavage_sites.out.bw_plus
+        .join(make_bigwig_for_cleavage_sites.out.bw_minus)
+
+    visualize_cleavage_site_motifs(bw_input_ch, params.ref)
+
     // ==============================================================================
     // GENE ASSIGNMENT
     // ==============================================================================
@@ -878,6 +885,35 @@ process visualize_polyA_tail_length_distribution {
     plot_polya_distributions.py \\
         --input ${tsv_files} \\
         --output_prefix polya_distribution
+    """
+}
+
+process visualize_cleavage_site_motifs {
+    tag "${sample_id}"
+    publishDir "${params.outdir}/analysis_figures/cleavage_site_motifs/${sample_id}", mode: 'copy'
+    label 'process_medium'
+    label 'env_plot' 
+
+    input:
+    tuple val(sample_id), path(bw_plus), path(bw_minus)
+    path fasta
+
+    output:
+    path "*.pdf"
+
+    script:
+    """
+    plot_cs_motifs \\
+        --bw_plus ${bw_plus} \\
+        --bw_minus ${bw_minus} \\
+        --fasta ${fasta} \\
+        --motifs ${params.motif_list} \\
+        --window_up ${params.motif_window_up} \\
+        --window_down ${params.motif_window_down} \\
+        --anchor ${params.motif_anchor} \\
+        --weighting ${params.motif_weighting} \\
+        --bins ${params.motif_score_bins} \\
+        --out_prefix ${sample_id}_motif_metaplot
     """
 }
 
