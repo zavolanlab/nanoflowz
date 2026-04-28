@@ -119,56 +119,72 @@ def main():
         
         combined_df = pd.merge(combined_df, all_ends[['chrom', 'strand', 'three_prime', 'cluster_id']], on=['chrom', 'strand', 'three_prime'])
 
-        # 4. Final Enrichment Logic (Collapse)
-        enriched_isoforms = []
-        # Group by intron structure and 3' cluster
+        # 4. Final Enrichment Logic
+        # Only collect truly novel isoforms — read groups with no reference match.
+        # Reference isoforms are taken directly from ref_df (all of them, unchanged).
+        novel_isoforms = []
         for (chrom, strand, introns, cluster_id), group in combined_df.groupby(['chrom', 'strand', 'introns', 'cluster_id']):
             ref_subset = group[group['is_ref'] == True]
-            
-            if not ref_subset.empty:
-                # Use reference metadata if it exists in this structural group
-                t_id = ref_subset['transcript_id'].iloc[0]
-                t_start = ref_subset['start'].min()
-                t_end = ref_subset['end'].max()
-            else:
-                # Create novel isoform ID if no reference matches
-                t_id = f"novel_isoform_{len(enriched_isoforms)}"
-                t_start = group['start'].min()
-                t_end = group['end'].max()
-            
-            enriched_isoforms.append({
-                'transcript_id': t_id, 'chrom': chrom, 'strand': strand,
-                'start': t_start, 'end': t_end, 'introns': introns, 'cluster_id': cluster_id
-            })
-        
-        isoforms_df_final = pd.DataFrame(enriched_isoforms)
-        
-        # Save master TSV for the 'assign' mode
+            if ref_subset.empty:
+                t_id = f"novel_isoform_{len(novel_isoforms)}"
+                novel_isoforms.append({
+                    'transcript_id': t_id, 'chrom': chrom, 'strand': strand,
+                    'start': group['start'].min(), 'end': group['end'].max(),
+                    'introns': introns, 'cluster_id': cluster_id
+                })
+
+        novel_df = pd.DataFrame(novel_isoforms) if novel_isoforms else pd.DataFrame(columns=ref_df.columns)
+
+        # The TSV for assign mode must contain all isoforms (reference + novel)
+        # so reads can be matched against the full enriched set.
+        isoforms_df_final = pd.concat([ref_df, novel_df], ignore_index=True)
+
         out_tsv = f"{args.output_prefix}_enriched.tsv"
         isoforms_df_final.to_csv(out_tsv, sep='\t', index=False)
-        logging.info(f"Enriched TSV saved to {out_tsv}")
+        logging.info(f"Enriched TSV saved to {out_tsv} "
+                     f"({len(ref_data)} reference + {len(novel_isoforms)} novel isoforms)")
 
         # 5. Generate GTF file
-        gtf_lines = []
-        for _, row in isoforms_df_final.iterrows():
-            attr = f'transcript_id "{row["transcript_id"]}"; gene_id "gene_cluster_{row["cluster_id"]}";'
-            # Transcript row
-            gtf_lines.append([row['chrom'], 'ONT_pipeline', 'transcript', row['start']+1, row['end'], '.', row['strand'], '.', attr])
-            
-            # Exon rows derived from intron structure
-            intron_coords = ast.literal_eval(row['introns'])
-            if not intron_coords:
-                gtf_lines.append([row['chrom'], 'ONT_pipeline', 'exon', row['start']+1, row['end'], '.', row['strand'], '.', attr])
-            else:
-                current_start = row['start']
-                for i_start, i_end in sorted(intron_coords):
-                    gtf_lines.append([row['chrom'], 'ONT_pipeline', 'exon', current_start+1, i_start, '.', row['strand'], '.', attr])
-                    current_start = i_end
-                gtf_lines.append([row['chrom'], 'ONT_pipeline', 'exon', current_start+1, row['end'], '.', row['strand'], '.', attr])
-
+        # Start with every line of the original reference GTF (preserving all
+        # attributes, gene records, transcript records, exon records, etc.),
+        # then append new transcript/exon entries only for de novo isoforms.
         out_gtf_path = f"{args.output_prefix}_enriched.gtf"
-        pd.DataFrame(gtf_lines).to_csv(out_gtf_path, sep='\t', header=False, index=False, quoting=3)
-        logging.info(f"Enriched GTF saved to {out_gtf_path}")
+        with open(out_gtf_path, 'w') as out_gtf:
+            with open(args.input_gtf_file, 'r') as ref_file:
+                for line in ref_file:
+                    out_gtf.write(line)
+
+            for idx, row in novel_df.iterrows():
+                attr = f'transcript_id "{row["transcript_id"]}"; gene_id "novel_gene_{idx}";'
+                out_gtf.write('\t'.join([
+                    row['chrom'], 'ONT_pipeline', 'transcript',
+                    str(int(row['start']) + 1), str(int(row['end'])),
+                    '.', row['strand'], '.', attr
+                ]) + '\n')
+                intron_coords = ast.literal_eval(row['introns'])
+                if not intron_coords:
+                    out_gtf.write('\t'.join([
+                        row['chrom'], 'ONT_pipeline', 'exon',
+                        str(int(row['start']) + 1), str(int(row['end'])),
+                        '.', row['strand'], '.', attr
+                    ]) + '\n')
+                else:
+                    current_start = int(row['start'])
+                    for i_start, i_end in sorted(intron_coords):
+                        out_gtf.write('\t'.join([
+                            row['chrom'], 'ONT_pipeline', 'exon',
+                            str(current_start + 1), str(i_start),
+                            '.', row['strand'], '.', attr
+                        ]) + '\n')
+                        current_start = i_end
+                    out_gtf.write('\t'.join([
+                        row['chrom'], 'ONT_pipeline', 'exon',
+                        str(current_start + 1), str(int(row['end'])),
+                        '.', row['strand'], '.', attr
+                    ]) + '\n')
+
+        logging.info(f"Enriched GTF saved to {out_gtf_path} "
+                     f"(reference GTF + {len(novel_isoforms)} novel isoforms)")
 
     # --- MODE: ASSIGN ---
     elif args.mode == 'assign':

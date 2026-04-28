@@ -99,19 +99,19 @@ workflow {
     // ==============================================================================
     
     // 5.a Collect all redefined BAM files
-    // all_bams_ch = redefine_nh_tags.out.bam.map { it[1] }.collect()
+    all_bams_ch = redefine_nh_tags.out.bam.map { it[1] }.collect()
     
     // 5.b build "enriched" transcriptome annotation using all aligned reads across all input samples
-    // transcriptome_annotation_enrichment(
-    //     all_bams_ch, 
-    //     params.reference_gtf
-    // )
+    transcriptome_annotation_enrichment(
+        all_bams_ch, 
+        params.reference_gtf
+    )
 
     // 5.c Assign individual alignments for each sample to the transcript isoforms in enriched transcriptome
-    // read_to_transcript_assignment(
-    //     redefine_nh_tags.out.bam, 
-    //     transcriptome_annotation_enrichment.out.tsv
-    // )
+    read_to_transcript_assignment(
+        redefine_nh_tags.out.bam, 
+        transcriptome_annotation_enrichment.out.tsv
+    )
 
     // ==============================================================================
     // QC: Raw Current Signal visualization and annotation
