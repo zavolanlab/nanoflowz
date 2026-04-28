@@ -317,6 +317,7 @@ process scinpas_fix_softclipped {
     path "${bam.baseName}.fix_stats.csv", emit: csv
 
     script:
+    def shift_flag = params.shift_ambiguous_cs ? "--shift_ambiguous_cs" : ""
     """
     samtools index -@ ${task.cpus} ${bam}
     
@@ -328,8 +329,9 @@ process scinpas_fix_softclipped {
         --exact_out \\
         --one_based_tags \\
         --tag_orig_cs ${params.tag_orig_cs} \\
-        --tag_fixed_cs ${params.tag_fixed_cs}
-        
+        --tag_fixed_cs ${params.tag_fixed_cs} \\
+        ${shift_flag}
+
     samtools sort -@ ${task.cpus} -m 2G unsorted_fixed.bam > ${bam.baseName}.fixed.bam
     rm unsorted_fixed.bam
     """
@@ -809,7 +811,7 @@ process extract_read_tags_tsv {
 
 process visualize_polyA_tail_length_distribution {
     publishDir "${params.outdir}/analysis_figures/polyA_tail_lengths", mode: 'copy'
-    label 'process_single'
+    label 'process_medium'
     label 'env_plot' 
 
     input:
