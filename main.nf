@@ -42,7 +42,7 @@ workflow {
 
     // 2.c Alignment: Pass both the unmapped BAMs and the compiled index
     minimap2_align(orient_strands.out.ubam, build_minimap2_index.out.mmi)
-
+    
     // ==============================================================================
     // CHUNK-LEVEL PROCESSING (Highly Parallel)
     // ==============================================================================
@@ -52,7 +52,7 @@ workflow {
 
     // 2.e. Fix Softclipped Alignments
     scinpas_fix_softclipped(normalize_umi_lengths.out.bam, params.ref)
-
+    
     // 2.f. Extract PolyA reads
     scinpas_get_polyA(scinpas_fix_softclipped.out.bam, params.ref)
 
@@ -90,9 +90,60 @@ workflow {
 
     // 4.b Redefine NH Tags to correct for alignment filtering after UMI deduplication
     redefine_nh_tags(umi_tools_dedup.out.bam)
-
+    
     // 4.c Generate BigWigs for Cleavage Sites using the custom scripts
     make_bigwig_for_cleavage_sites(redefine_nh_tags.out.bam.join(redefine_nh_tags.out.bai), params.ref)
+
+    // ==============================================================================
+    // GENE ASSIGNMENT
+    // ==============================================================================
+
+    // Assign reads to genes via featureCounts
+    assign_alignments_to_genes(
+        redefine_nh_tags.out.bam.join(redefine_nh_tags.out.bai), 
+        params.reference_gtf
+    )
+
+    // ==============================================================================
+    // polyA tail length bigwig generation, collection of tabular data, and visualization
+    // ==============================================================================
+
+    // Generate PolyA tail length BigWigs (Mean/Median depending on configuration)
+    make_bigwig_for_polya_length(
+        assign_alignments_to_genes.out.bam.join(assign_alignments_to_genes.out.bai), params.ref)
+
+    // Extract Read ID, pt, and XT tags to a TSV Table
+    extract_read_tags_tsv(
+        assign_alignments_to_genes.out.bam.join(assign_alignments_to_genes.out.bai)
+    )
+
+    // Generate Comparative Boxplots across all samples
+    // Extract just the file (index 1 of the tuple) and collect them into a list
+    tsv_list_ch = extract_read_tags_tsv.out.tsv.map { sample_id, tsv_file -> tsv_file }.collect()
+    
+    visualize_polyA_tail_length_distribution(tsv_list_ch)
+
+    // ==============================================================================
+    // QC: MAPPING STATISTICS
+    // ==============================================================================
+    
+    ch_to_count = dorado_basecall.out.ubam.map{ id, bam -> [id, bam, "01_dorado_basecall"] }
+        .mix(
+            orient_strands.out.ubam.map{ id, bam -> [id, bam, "02_reverse_complemented_backward_oriented_reads"] },
+            minimap2_align.out.bam.map{ id, bam -> [id, bam, "03_aligned_with_minimap2"] },
+            normalize_umi_lengths.out.bam.map{ id, bam -> [id, bam, "04_normalized_umi_lengths"] },
+            scinpas_fix_softclipped.out.bam.map{ id, bam -> [id, bam, "05_fixed_softclipped_alignments"] },
+            scinpas_get_polyA.out.polyA_bam.map{ id, bam -> [id, bam, "06_extracted_polyA_reads"] },
+            append_polyA_tails.out.bam.map{ id, bam -> [id, bam, "07_appended_polyA_tails"] },
+            umi_tools_dedup.out.bam.map{ id, bam -> [id, bam, "08_umi_deduped"] },
+            redefine_nh_tags.out.bam.map{ id, bam -> [id, bam, "09_nh_tags_and_MAPQ_redefined"] },
+            assign_alignments_to_genes.out.bam.map{ id, bam -> [id, bam, "10_geneID_assigned"] }
+        )
+
+    // Call count_reads
+    all_read_counts = count_reads(ch_to_count)
+
+    aggregate_read_stats(all_read_counts.collect())
 
     // ==============================================================================
     // ISOFORM ANALYSIS
@@ -252,7 +303,7 @@ process minimap2_align {
     # 1. samtools fastq -T "*" extracts the fastq AND appends all BAM tags to the header.
     # 2. minimap2 -y reads those tags and securely copies them into the aligned BAM output.
     samtools fastq -@ ${task.cpus} -T "*" ${ubam} \\
-        | minimap2 -y -ax splice -Y -t ${task.cpus} ${mmi_index} - \\
+        | minimap2 -y -ax splice:hq --secondary=no -Y -t ${task.cpus} ${mmi_index} - \\
         | samtools sort -m 2G -@ ${task.cpus} -o \$OUT_BAM -
     """
 }
@@ -271,6 +322,7 @@ process scinpas_fix_softclipped {
     path "${bam.baseName}.fix_stats.csv", emit: csv
 
     script:
+    def shift_flag = params.shift_ambiguous_cs ? "--shift_ambiguous_cs" : ""
     """
     samtools index -@ ${task.cpus} ${bam}
     
@@ -282,8 +334,9 @@ process scinpas_fix_softclipped {
         --exact_out \\
         --one_based_tags \\
         --tag_orig_cs ${params.tag_orig_cs} \\
-        --tag_fixed_cs ${params.tag_fixed_cs}
-        
+        --tag_fixed_cs ${params.tag_fixed_cs} \\
+        ${shift_flag}
+
     samtools sort -@ ${task.cpus} -m 2G unsorted_fixed.bam > ${bam.baseName}.fixed.bam
     rm unsorted_fixed.bam
     """
@@ -567,6 +620,89 @@ process redefine_nh_tags {
     """
 }
 
+// for QC - collecting mapping stats at each step of the pipeline
+
+process count_reads {
+    tag "${sample_id} - ${step_name}"
+    label 'process_medium'
+    label 'env_samtools'
+
+    input:
+    tuple val(sample_id), path(bam), val(step_name)
+
+    output:
+    path "${bam.baseName}.${step_name}.tsv", emit: tsv
+
+    script:
+    """
+    count_reads.sh ${sample_id} ${step_name} ${bam} ${task.cpus} ${bam.baseName}.${step_name}.tsv
+    """
+}
+
+process aggregate_read_stats {
+    publishDir "${params.outdir}/QC", mode: 'copy'
+    label 'process_single'
+    label 'env_bam_processing_with_python'
+    
+    input:
+    path tsv_files
+    
+    output:
+    path "master_read_tracking_stats.tsv"
+    
+    script:
+    """
+    aggregate_read_stats.py --input ${tsv_files} --output master_read_tracking_stats.tsv
+    """
+}
+
+process assign_alignments_to_genes {
+    tag "${sample_id}"
+    publishDir "${params.outdir}/gene_assignments", mode: 'copy'
+    label 'process_medium'
+    label 'env_featureCounts' 
+
+    input:
+    tuple val(sample_id), path(bam), path(bai)
+    path gtf
+
+    output:
+    tuple val(sample_id), path("${sample_id}.gene_assigned.sorted.bam"), emit: bam
+    tuple val(sample_id), path("${sample_id}.gene_assigned.sorted.bam.bai"), emit: bai
+    path "${sample_id}.featureCounts.txt", emit: summary
+    path "${sample_id}.featureCounts.txt.summary", emit: feature_stats
+
+    script:
+    """
+    # 1. Run featureCounts with -R CORE to generate a text map of assignments
+    featureCounts \\
+        -T ${task.cpus} \\
+        -L \\
+        -M \\
+        -O \\
+        -s 1 \\
+        -a ${gtf} \\
+        -o ${sample_id}.featureCounts.txt \\
+        -R CORE \\
+        ${bam}
+
+    # featureCounts automatically writes the text assignments to "<input_bam>.featureCounts"
+    
+    # 2. Inject the XT and XS tags directly into a new BAM
+    tag_bam_with_fc.py \\
+        --bam_in ${bam} \\
+        --core_txt ${bam}.featureCounts \\
+        --bam_out unsorted_tagged.bam
+
+    # 3. Sort and index the tagged BAM
+    samtools sort -@ ${task.cpus} -m 2G unsorted_tagged.bam > ${sample_id}.gene_assigned.sorted.bam
+    samtools index -@ ${task.cpus} ${sample_id}.gene_assigned.sorted.bam
+
+    # 4. Clean up
+    rm unsorted_tagged.bam ${bam}.featureCounts
+    """
+}
+
 process make_bigwig_for_cleavage_sites {
     tag "${sample_id}"
     publishDir "${params.outdir}/cleavage_sites_bigwigs", mode: 'copy'
@@ -587,18 +723,21 @@ process make_bigwig_for_cleavage_sites {
     # 1. Create genome index if not already present
     samtools faidx ${fasta}
     
-    # 2. Extract Cleavage Sites using the dedicated Python script
+    # 2. Extract Cleavage Sites with 1/NH weights
     extract_cs_bigwig.py \\
         --bam_in ${bam} \\
         --bed_out cs.bed \\
-        --tag ${params.tag_quantification_cs}
+        --tag ${params.tag_quantification_cs} \\
+        --include_multimappers ${params.include_multimappers}
 
     # 3. Sort the extracted BED
     sort -k1,1 -k2,2n cs.bed > cs.sorted.bed
 
-    # 4. Generate BedGraphs per strand
-    awk '\$6 == "+"' cs.sorted.bed | bedtools genomecov -i stdin -g ${fasta}.fai -bg > plus.bg
-    awk '\$6 == "-"' cs.sorted.bed | bedtools genomecov -i stdin -g ${fasta}.fai -bg > minus.bg
+    # 4. Generate Weighted BedGraphs per strand
+    # Since intervals are exactly 1bp long, we just group by coordinate and sum the weights (col 5).
+    # This natively outputs the exact 4-column format required for BedGraphs!
+    awk '\$6 == "+"' cs.sorted.bed | bedtools groupby -g 1,2,3 -c 5 -o sum > plus.bg
+    awk '\$6 == "-"' cs.sorted.bed | bedtools groupby -g 1,2,3 -c 5 -o sum > minus.bg
 
     # 5. Sort BedGraphs (bedGraphToBigWig strictly requires coordinate-sorted input)
     sort -k1,1 -k2,2n plus.bg > plus.sorted.bg
@@ -608,19 +747,13 @@ process make_bigwig_for_cleavage_sites {
     [ -s plus.sorted.bg ]  && bedGraphToBigWig plus.sorted.bg  ${fasta}.fai ${sample_id}.plus.bigwig  || touch ${sample_id}.plus.bigwig
     [ -s minus.sorted.bg ] && bedGraphToBigWig minus.sorted.bg ${fasta}.fai ${sample_id}.minus.bigwig || touch ${sample_id}.minus.bigwig
 
-    # 7. Generate Summary TSV (chr, start, end, strand, count)
-    # bedtools groupby groups by chrom, start, end, strand and counts the read names
-    if [ -s cs.sorted.bed ]; then
-        bedtools groupby -i cs.sorted.bed -g 1,2,3,6 -c 4 -o count > ${sample_id}.read_sum.tsv
-    else
-        touch ${sample_id}.read_sum.tsv
-    fi
+    # 7. Generate Summary TSV (chr, start, end, strand, weighted_count)
+    bedtools groupby -i cs.sorted.bed -g 1,2,3,6 -c 5 -o sum > ${sample_id}.read_sum.tsv
     
     # Clean up intermediate large files
     rm cs.bed plus.bg minus.bg plus.sorted.bg minus.sorted.bg
     """
 }
-
 
 process check_gtf_genome_compatibility {
     label 'process_single'
@@ -668,6 +801,83 @@ process check_gtf_genome_compatibility {
     fi
 
     echo "OK: \${FOUND_IN_GTF}/\${TOTAL_GENOME} genome chromosomes (\${PCT}%) present in GTF." | tee -a compatibility_check.txt
+    """
+}
+process make_bigwig_for_polya_length {
+    tag "${sample_id}"
+    publishDir "${params.outdir}/polya_length_bigwigs", mode: 'copy'
+    label 'process_medium'
+    label 'env_bam_processing_with_python' 
+
+    input:
+    tuple val(sample_id), path(bam), path(bai)
+    path fasta
+
+    output:
+    tuple val(sample_id), path("${sample_id}.polya_${params.polya_tail_metric}.plus.bigwig"), emit: bw_plus
+    tuple val(sample_id), path("${sample_id}.polya_${params.polya_tail_metric}.minus.bigwig"), emit: bw_minus
+
+    script:
+    """
+    samtools faidx ${fasta}
+    
+    # Python script natively computes the weighted mean/median bedgraphs!
+    compute_polya_bedgraphs.py \\
+        --bam_in ${bam} \\
+        --tag_cs ${params.tag_quantification_cs} \\
+        --metric ${params.polya_tail_metric} \\
+        --include_multimappers ${params.include_multimappers}
+
+    # Sort BedGraphs
+    sort -k1,1 -k2,2n plus.bg > plus.sorted.bg
+    sort -k1,1 -k2,2n minus.bg > minus.sorted.bg
+
+    # Convert to BigWig
+    bedGraphToBigWig plus.sorted.bg ${fasta}.fai ${sample_id}.polya_${params.polya_tail_metric}.plus.bigwig
+    bedGraphToBigWig minus.sorted.bg ${fasta}.fai ${sample_id}.polya_${params.polya_tail_metric}.minus.bigwig
+    
+    rm plus.bg minus.bg plus.sorted.bg minus.sorted.bg
+    """
+}
+
+process extract_read_tags_tsv {
+    tag "${sample_id}"
+    publishDir "${params.outdir}/read_tag_tables", mode: 'copy'
+    label 'process_medium_low_cpu'
+    label 'env_bam_processing_with_python'
+
+    input:
+    tuple val(sample_id), path(bam), path(bai)
+
+    output:
+    tuple val(sample_id), path("${sample_id}.tags.tsv.gz"), emit: tsv
+
+    script:
+    """
+    extract_bam_tags.py \\
+        --bam_in ${bam} \\
+        --tsv_out ${sample_id}.tags.tsv.gz \\
+        --tags ${params.bam_export_tags} \\
+        --include_multimappers ${params.include_multimappers}
+    """
+}
+
+process visualize_polyA_tail_length_distribution {
+    publishDir "${params.outdir}/analysis_figures/polyA_tail_lengths", mode: 'copy'
+    label 'process_medium'
+    label 'env_plot' 
+
+    input:
+    path tsv_files
+
+    output:
+    path "*.pdf"
+
+    script:
+    """
+    plot_polya_distributions.py \\
+        --input ${tsv_files} \\
+        --output_prefix polya_distribution
     """
 }
 

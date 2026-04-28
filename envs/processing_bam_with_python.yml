@@ -9,11 +9,10 @@ dependencies:
   - conda-forge::pigz
   - bioconda::ucsc-wigtobigwig
   - bioconda::ucsc-bedgraphtobigwig
-  - bioconda::pysam
   - pip
   - pip:
       # This tells pip to install directly from the branches of the GitHub repos
       - git+https://github.com/zavolanlab/zavolab_pyutils.git@dev
       - git+https://github.com/zavolanlab/SCINPAS.git@making_CLI_interface_for_python_functions
 
-# Cache Bust: Apr 22 — added pysam
+# Cache Bust: Added April 27 14:34 to force pip pulling the latest version of zavolab_pyutils

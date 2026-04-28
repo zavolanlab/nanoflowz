@@ -1,0 +1,10 @@
+name: nf-featureCounts
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - bioconda::subread
+  - bioconda::samtools
+  - python=3.10
+  - pysam
+  - pandas
