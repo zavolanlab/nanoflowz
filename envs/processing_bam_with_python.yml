@@ -15,4 +15,4 @@ dependencies:
       - git+https://github.com/zavolanlab/zavolab_pyutils.git@dev
       - git+https://github.com/zavolanlab/SCINPAS.git@making_CLI_interface_for_python_functions
 
-# Cache Bust: Added April 27 14:34 to force pip pulling the latest version of zavolab_pyutils
+# Cache Bust: Added May 12 17:39 to force pip pulling the latest version of zavolab_pyutils and SCINPAS

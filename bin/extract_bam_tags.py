@@ -14,24 +14,27 @@ def main():
     include_mm = args.include_multimappers.lower() == 'true'
 
     with pysam.AlignmentFile(args.bam_in, "rb") as bam, gzip.open(args.tsv_out, "wt") as f:
-        f.write("read_id\tchromosome\t" + "\t".join(args.tags) + "\n")
-        
-        for r in bam:
-            if r.is_unmapped:
+        # Set up columns: Read ID, Chrom, Strand, [Tags...]
+        header = ["read_id", "chrom", "strand"] + args.tags
+    
+        f.write("\t".join(header) + "\n")
+        for read in bam:
+            if read.is_unmapped:
                 continue
                 
-            if not include_mm and r.mapping_quality != 255:
+            if not include_mm and read.get_tag("NH") > 1:
                 continue
-
-            chrom = r.reference_name if r.reference_name else "NA"
-            row = [r.query_name, chrom]
+                
+            chrom = read.reference_name
+            strand = '-' if read.is_reverse else '+'
+            row = [read.query_name, chrom, strand]
             
-            for tag in args.tags:
+            for t in args.tags:
                 try:
-                    val = str(r.get_tag(tag))
+                    val = read.get_tag(t)
+                    row.append(str(val))
                 except KeyError:
-                    val = "NA"
-                row.append(val)
+                    row.append("NA")
             f.write("\t".join(row) + "\n")
 
 if __name__ == "__main__":

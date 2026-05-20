@@ -94,13 +94,6 @@ workflow {
     // 4.c Generate BigWigs for Cleavage Sites using the custom scripts
     make_bigwig_for_cleavage_sites(redefine_nh_tags.out.bam.join(redefine_nh_tags.out.bai), params.ref)
 
-    // Motif Meta-plots
-    // Join the plus and minus bigwigs by sample_id
-    bw_input_ch = make_bigwig_for_cleavage_sites.out.bw_plus
-        .join(make_bigwig_for_cleavage_sites.out.bw_minus)
-
-    visualize_cleavage_site_motifs(bw_input_ch, params.ref)
-
     // ==============================================================================
     // GENE ASSIGNMENT
     // ==============================================================================
@@ -112,16 +105,33 @@ workflow {
     )
 
     // ==============================================================================
+    // CPA MOTIF ASSIGNMENT
+    // ==============================================================================
+
+    // Motif Meta-plots - these plots are not based on relative usage, this is only for very rough analysis
+    // Join the plus and minus bigwigs by sample_id
+    bw_input_ch = make_bigwig_for_cleavage_sites.out.bw_plus
+        .join(make_bigwig_for_cleavage_sites.out.bw_minus)
+
+    visualize_cleavage_site_motifs(bw_input_ch, params.ref)
+
+    // Annotate the featureCounts BAM with Motif tags (YF)
+    annotate_reads_with_motifs(
+        assign_alignments_to_genes.out.bam.join(assign_alignments_to_genes.out.bai),
+        params.ref
+    )
+
+    // ==============================================================================
     // polyA tail length bigwig generation, collection of tabular data, and visualization
     // ==============================================================================
 
     // Generate PolyA tail length BigWigs (Mean/Median depending on configuration)
     make_bigwig_for_polya_length(
-        assign_alignments_to_genes.out.bam.join(assign_alignments_to_genes.out.bai), params.ref)
+        annotate_reads_with_motifs.out.bam.join(annotate_reads_with_motifs.out.bai), params.ref)
 
     // Extract Read ID, pt, and XT tags to a TSV Table
     extract_read_tags_tsv(
-        assign_alignments_to_genes.out.bam.join(assign_alignments_to_genes.out.bai)
+        annotate_reads_with_motifs.out.bam.join(annotate_reads_with_motifs.out.bai)
     )
 
     // Generate Comparative Boxplots across all samples
@@ -311,6 +321,7 @@ process minimap2_align {
     # 2. minimap2 -y reads those tags and securely copies them into the aligned BAM output.
     samtools fastq -@ ${task.cpus} -T "*" ${ubam} \\
         | minimap2 -y -ax splice:hq --secondary=no -Y -t ${task.cpus} ${mmi_index} - \\
+        | samtools view -@ ${task.cpus} -F 2048 -u - \\
         | samtools sort -m 2G -@ ${task.cpus} -o \$OUT_BAM -
     """
 }
@@ -364,6 +375,8 @@ process scinpas_get_polyA {
     path "${bam.baseName}.polyA_stats.tsv", emit: stats
 
     script:
+    def shift_flag = params.shift_ambiguous_cs ? "--shift_ambiguous_cs" : ""
+
     """
     samtools index -@ ${task.cpus} ${bam}
     
@@ -383,7 +396,8 @@ process scinpas_get_polyA {
         --tag_phred_mapped ${params.tag_phred_mapped} \\
         --tag_phred_softclipped ${params.tag_phred_softclipped} \\
         --tag_orig_cs ${params.tag_orig_cs} \\
-        --tag_fixed_cs ${params.tag_fixed_cs}
+        --tag_fixed_cs ${params.tag_fixed_cs} \\
+        ${shift_flag}
     """
 }
 
@@ -450,14 +464,21 @@ process append_polyA_tails {
 
     script:
     """
+    # Output to temporary unsorted files
     append_polyA_tail.py \\
         --input_bam ${polyA_bam} \\
-        --output_appended_bam ${polyA_bam.baseName}.pA_appended.bam \\
-        --output_skipped_bam ${polyA_bam.baseName}.pA_skipped.bam \\
+        --output_appended_bam unsorted_appended.bam \\
+        --output_skipped_bam unsorted_skipped.bam \\
         --stats_tsv ${polyA_bam.baseName}.pt_stats.tsv \\
         --sample_id ${sample_id} \\
         --tag_orig_cs ${params.tag_orig_cs} \\
         --tag_fixed_cs ${params.tag_fixed_cs}
+
+    # Re-sort the BAMs because shifting read coordinates breaks sorting order
+    samtools sort -@ ${task.cpus} -m 2G unsorted_appended.bam > ${polyA_bam.baseName}.pA_appended.bam
+    samtools sort -@ ${task.cpus} -m 2G unsorted_skipped.bam > ${polyA_bam.baseName}.pA_skipped.bam
+    
+    rm unsorted_appended.bam unsorted_skipped.bam
     """
 }
 
@@ -707,6 +728,38 @@ process assign_alignments_to_genes {
 
     # 4. Clean up
     rm unsorted_tagged.bam ${bam}.featureCounts
+    """
+}
+
+process annotate_reads_with_motifs {
+    tag "${sample_id}"
+    label 'process_medium'
+    label 'env_bam_processing_with_python'
+    publishDir "${params.outdir}/motif_annotated_bams", mode: 'copy'
+
+    input:
+    tuple val(sample_id), path(bam), path(bai)
+    path fasta
+
+    output:
+    tuple val(sample_id), path("${sample_id}.motif_annotated.bam"), emit: bam
+    tuple val(sample_id), path("${sample_id}.motif_annotated.bam.bai"), emit: bai
+
+    script:
+    """
+    annotate_motifs_in_bam.py \\
+        --bam_in ${bam} \\
+        --bam_out unsorted_motif.bam \\
+        --fasta ${fasta} \\
+        --motifs ${params.motif_list} \\
+        --window_up ${params.motif_window_up} \\
+        --window_down ${params.motif_window_down} \\
+        --tag_cs ${params.tag_quantification_cs} \\
+        --tag_motif ${params.tag_motif_info}
+
+    samtools sort -@ ${task.cpus} -m 2G unsorted_motif.bam > ${sample_id}.motif_annotated.bam
+    samtools index -@ ${task.cpus} ${sample_id}.motif_annotated.bam
+    rm unsorted_motif.bam
     """
 }
 

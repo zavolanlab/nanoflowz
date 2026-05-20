@@ -1,157 +1,152 @@
 #!/usr/bin/env python3
-
-import warnings
-warnings.simplefilter('ignore')
-
-import sys
-from argparse import ArgumentParser, RawTextHelpFormatter
-import os
-import numpy as np
 import pysam
-import csv
+import argparse
+import sys
 
-def get_rc(seq):
-    """Return the reverse complement of a sequence."""
-    trans = str.maketrans("ACGTUacgtuNn", "TGCAAtgcaaNn")
-    return seq.translate(trans)[::-1]
+def get_args():
+    parser = argparse.ArgumentParser(description="Append polyA tails to reads")
+    parser.add_argument('--input_bam', required=True)
+    parser.add_argument('--output_appended_bam', required=True)
+    parser.add_argument('--output_skipped_bam', required=True)
+    parser.add_argument('--stats_tsv', required=True)
+    parser.add_argument('--sample_id', required=True)
+    parser.add_argument('--tag_orig_cs', default="XO")
+    parser.add_argument('--tag_fixed_cs', default="XF")
+    return parser.parse_args()
 
 def main():
-    parser = ArgumentParser(description="Append polyA tails based on pt and fixed cleavage site tags.")
-    parser.add_argument("--input_bam", required=True)
-    parser.add_argument("--output_appended_bam", required=True)
-    parser.add_argument("--output_skipped_bam", required=True)
-    parser.add_argument("--stats_tsv", required=True)
-    parser.add_argument("--sample_id", required=True)
-    parser.add_argument("--tag_orig_cs", default="XO")
-    parser.add_argument("--tag_fixed_cs", default="XF")
+    args = get_args()
     
-    args = parser.parse_args()
+    bam_in = pysam.AlignmentFile(args.input_bam, "rb")
+    bam_appended = pysam.AlignmentFile(args.output_appended_bam, "wb", header=bam_in.header)
+    bam_skipped = pysam.AlignmentFile(args.output_skipped_bam, "wb", header=bam_in.header)
     
-    almnt_file = pysam.AlignmentFile(args.input_bam, "rb")
-    bam_appended = pysam.AlignmentFile(args.output_appended_bam, "wb", header=almnt_file.header)
-    bam_skipped = pysam.AlignmentFile(args.output_skipped_bam, "wb", header=almnt_file.header)
+    appended_count = 0
+    skipped_count = 0
     
-    reads_total = 0
-    reads_appended = 0
-    reads_skipped_no_pt = 0
-    reads_skipped_pt_outside_valid_range = 0
-    reads_skipped_error = 0
-    
-    for almnt in almnt_file:
-        reads_total += 1
-        
-        # 1. Check for valid pt tag
+    for read in bam_in:
+        # Skip unmapped reads
+        if read.is_unmapped:
+            bam_skipped.write(read)
+            skipped_count += 1
+            continue
+            
+        # Extract tags safely
         try:
-            pt = almnt.get_tag('pt')
-        except KeyError:
-            pt = -1
-            reads_skipped_no_pt += 1
-            bam_skipped.write(almnt)
+            pt = int(read.get_tag('pt'))
+            if pt <= 0:
+                raise ValueError
+            orig_cs = int(read.get_tag(args.tag_orig_cs))
+            fixed_cs = int(read.get_tag(args.tag_fixed_cs))
+        except (KeyError, ValueError):
+            bam_skipped.write(read)
+            skipped_count += 1
             continue
             
-        if pt <= 0:
-            bam_skipped.write(almnt)
-            reads_skipped_pt_outside_valid_range += 1
-            continue
-            
-        # 2. Get Cleavage Site Shift Difference
-        try:
-            OCS = almnt.get_tag(args.tag_orig_cs)
-            FCS = almnt.get_tag(args.tag_fixed_cs)
-            # The absolute difference is exactly how many bases were "rescued" from the softclip
-            difference = abs(OCS - FCS)
-        except KeyError:
-            bam_skipped.write(almnt)
-            reads_skipped_error += 1
-            continue
-
-        # 3. Orient to transcript 5' -> 3'
-        if almnt.is_forward:
-            read_seq = almnt.query_sequence
-            read_qualstr = almnt.query_qualities
-            cigar = list(almnt.cigar)
-        else:
-            read_seq = almnt.get_forward_sequence()
-            read_qualstr = almnt.query_qualities[::-1] if almnt.query_qualities else None
-            cigar = list(almnt.cigar)[::-1]
-            
-        # 4. Calculate exact truncation
-        old_clip_len = cigar[-1][1] if cigar[-1][0] == 4 else 0
-        trim_len = old_clip_len - difference
+        rev = read.is_reverse
+        cigar = read.cigartuples
+        seq = read.query_sequence
+        qual = read.query_qualities
         
-        if trim_len < 0:
-            bam_skipped.write(almnt)
-            reads_skipped_error += 1
-            continue
-
-        # 5. Modify Sequence
-        new_read_seq = read_seq[:(-trim_len if trim_len > 0 else None)] + "A" * pt
-
-        # 6. Modify Quality String
-        if read_qualstr is not None:
-            if trim_len > 0:
-                trimmed_quals = read_qualstr[-trim_len:]
-            else:
-                trimmed_quals = read_qualstr[-(min(5, len(read_seq))):] if len(read_seq) > 0 else [30]
-            
-            quality_val = int(np.round(np.mean(trimmed_quals), 0)) if len(trimmed_quals) > 0 else 30
+        try:
+            if not rev:  # '+' strand
+                # Outward shift (rescue): fixed > orig -> diff > 0
+                # Inward shift (discard): fixed < orig -> diff < 0
+                diff = fixed_cs - orig_cs
                 
-            new_read_qualstr = list(read_qualstr[:(-trim_len if trim_len > 0 else None)])
-            new_read_qualstr.extend([quality_val] * pt)
-        else:
-            new_read_qualstr = None
-
-        # 7. Modify CIGAR
-        new_cigar = [[op, length] for op, length in cigar]
-            
-        if new_cigar[-1][0] == 4:
-            new_cigar.pop() # Remove old 3' soft-clip
-            
-        if difference > 0:
-            for idx in range(len(new_cigar)-1, -1, -1):
-                if new_cigar[idx][0] == 0: # Add rescued bases to the last Match (M) block
-                    new_cigar[idx][1] += difference
-                    break
+                sc_len = cigar[-1][1] if cigar[-1][0] == 4 else 0
+                cut_right = sc_len - diff
+                
+                if cut_right > 0:
+                    new_seq = seq[:-cut_right] + ("A" * pt)
+                    new_qual = list(qual[:-cut_right]) + [30] * pt
+                else:
+                    new_seq = seq + ("A" * pt)
+                    new_qual = list(qual) + [30] * pt
                     
-        if pt > 0:
-            new_cigar.append([4, pt]) # Append new soft-clip of length pt
+                # Fix CIGAR
+                if cigar[-1][0] == 4:
+                    new_cigar = cigar[:-1]
+                else:
+                    new_cigar = list(cigar)
+                    
+                last_match_idx = len(new_cigar) - 1
+                while last_match_idx >= 0 and new_cigar[last_match_idx][0] not in [0, 7, 8]:
+                    last_match_idx -= 1
+                    
+                if last_match_idx >= 0:
+                    adj_match = new_cigar[last_match_idx][1] + diff
+                    if adj_match > 0:
+                        new_cigar[last_match_idx] = (new_cigar[last_match_idx][0], adj_match)
+                    else:
+                        raise ValueError("Inward shift exceeds match length")
+                        
+                new_cigar.append((4, pt))
+                
+            else:  # '-' strand
+                # Outward shift: orig > fixed -> diff > 0
+                # Inward shift: orig < fixed -> diff < 0
+                diff = orig_cs - fixed_cs
+                
+                sc_len = cigar[0][1] if cigar[0][0] == 4 else 0
+                cut_left = sc_len - diff
+                
+                if cut_left > 0:
+                    new_seq = ("T" * pt) + seq[cut_left:]
+                    new_qual = [30] * pt + list(qual[cut_left:])
+                else:
+                    new_seq = ("T" * pt) + seq
+                    new_qual = [30] * pt + list(qual)
+                    
+                # Fix CIGAR
+                if cigar[0][0] == 4:
+                    new_cigar = cigar[1:]
+                else:
+                    new_cigar = list(cigar)
+                    
+                first_match_idx = 0
+                while first_match_idx < len(new_cigar) and new_cigar[first_match_idx][0] not in [0, 7, 8]:
+                    first_match_idx += 1
+                    
+                if first_match_idx < len(new_cigar):
+                    adj_match = new_cigar[first_match_idx][1] + diff
+                    if adj_match > 0:
+                        new_cigar[first_match_idx] = (new_cigar[first_match_idx][0], adj_match)
+                    else:
+                        raise ValueError("Inward shift exceeds match length")
+                        
+                new_cigar = [(4, pt)] + new_cigar
+                
+                # Calculate the physical POS shift for the minus strand ---
+                # If diff is negative (inward shift), new_start increases.
+                # If diff is positive (outward shift), new_start decreases.
+                new_start = read.reference_start - diff
             
-        # Validation Check
-        cigar_query_len = sum(length for op, length in new_cigar if op in [0, 1, 4, 7, 8])
-        if len(new_read_seq) != cigar_query_len or (new_read_qualstr and len(new_read_seq) != len(new_read_qualstr)):
-            bam_skipped.write(almnt)
-            reads_skipped_error += 1
-            continue
+            # Apply adjustments to the PySAM object
+            read.query_sequence = new_seq
+            read.query_qualities = new_qual
+            read.cigartuples = new_cigar
             
-        # 8. Convert back to original BAM orientation
-        if almnt.is_forward:
-            almnt.query_sequence = new_read_seq
-            almnt.query_qualities = new_read_qualstr
-            almnt.cigar = new_cigar
-        else:
-            almnt.query_sequence = get_rc(new_read_seq)
-            if new_read_qualstr is not None:
-                almnt.query_qualities = new_read_qualstr[::-1]
-            almnt.cigar = new_cigar[::-1]
+            # Apply the POS shift for the minus strand
+            if rev:
+                read.reference_start = new_start
             
-        almnt.set_tag('pa', 1, 'i')
-        bam_appended.write(almnt)
-        reads_appended += 1
-        
-    almnt_file.close()
+            bam_appended.write(read)
+            appended_count += 1
+            
+        except Exception as e:
+            # Safely skip reads that fail extreme boundary math
+            bam_skipped.write(read)
+            skipped_count += 1
+
+    bam_in.close()
     bam_appended.close()
     bam_skipped.close()
     
-    # 9. Write TSV Stats
-    with open(args.stats_tsv, 'w', newline='') as tsv_file:
-        writer = csv.writer(tsv_file, delimiter='\t')
-        writer.writerow(["sample_id", "chunk_filename", "total_alignments", "appended_alignments", "skipped_no_pt", "skipped_error", "skipped_pt_outside_valid_range"])
-        chunk_name = os.path.basename(args.input_bam)
-        writer.writerow([args.sample_id, chunk_name, reads_total, reads_appended, reads_skipped_no_pt, reads_skipped_error, reads_skipped_pt_outside_valid_range])
+    # Write stats tracker
+    with open(args.stats_tsv, "w") as f:
+        f.write("sample_id\tappended_reads\tskipped_reads\n")
+        f.write(f"{args.sample_id}\t{appended_count}\t{skipped_count}\n")
 
-if __name__ == '__main__':
-    try:
-        main()
-    except KeyboardInterrupt:
-        sys.stderr.write("User interrupt!")
-        sys.exit(1)
+if __name__ == "__main__":
+    main()
