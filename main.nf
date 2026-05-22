@@ -112,8 +112,10 @@ workflow {
     // Join the plus and minus bigwigs by sample_id
     bw_input_ch = make_bigwig_for_cleavage_sites.out.bw_plus
         .join(make_bigwig_for_cleavage_sites.out.bw_minus)
-
-    visualize_cleavage_site_motifs(bw_input_ch, params.ref)
+    
+    if (params.visualize_cleavage_site_motifs_flag) {
+        visualize_cleavage_site_motifs(bw_input_ch, params.ref)
+    }
 
     // Annotate the featureCounts BAM with Motif tags (YF)
     annotate_reads_with_motifs(
@@ -134,11 +136,18 @@ workflow {
         annotate_reads_with_motifs.out.bam.join(annotate_reads_with_motifs.out.bai)
     )
 
+    // Generate BED file of grouped cleavage sites - for usage in downstream applications like PAQR-AI
+    create_cs_bed(
+        extract_read_tags_tsv.out.tsv
+    )
+
     // Generate Comparative Boxplots across all samples
     // Extract just the file (index 1 of the tuple) and collect them into a list
     tsv_list_ch = extract_read_tags_tsv.out.tsv.map { sample_id, tsv_file -> tsv_file }.collect()
     
-    visualize_polyA_tail_length_distribution(tsv_list_ch)
+    if (params.visualize_polyA_tail_length_distribution_flag) {
+        visualize_polyA_tail_length_distribution(tsv_list_ch)
+    }
 
     // ==============================================================================
     // QC: MAPPING STATISTICS
@@ -149,7 +158,7 @@ workflow {
             orient_strands.out.ubam.map{ id, bam -> [id, bam, "02_reverse_complemented_backward_oriented_reads"] },
             minimap2_align.out.bam.map{ id, bam -> [id, bam, "03_aligned_with_minimap2"] },
             normalize_umi_lengths.out.bam.map{ id, bam -> [id, bam, "04_normalized_umi_lengths"] },
-            scinpas_fix_softclipped.out.bam.map{ id, bam -> [id, bam, "05_fixed_softclipped_alignments"] },
+            scinpas_fix_softclipped.out.bam.map{ id, bam -> [id, bam, "05_fixed_softclipped_alignments_AND_discarded_unmapped_reads"] },
             scinpas_get_polyA.out.polyA_bam.map{ id, bam -> [id, bam, "06_extracted_polyA_reads"] },
             append_polyA_tails.out.bam.map{ id, bam -> [id, bam, "07_appended_polyA_tails"] },
             umi_tools_dedup.out.bam.map{ id, bam -> [id, bam, "08_umi_deduped"] },
@@ -919,6 +928,27 @@ process extract_read_tags_tsv {
         --tsv_out ${sample_id}.tags.tsv.gz \\
         --tags ${params.bam_export_tags} \\
         --include_multimappers ${params.include_multimappers}
+    """
+}
+
+process create_cs_bed {
+    tag "${sample_id}"
+    publishDir "${params.outdir}/CS_bed_quantification", mode: 'copy'
+    label 'process_medium_low_cpu'
+    label 'env_bam_processing_with_python'
+
+    input:
+    tuple val(sample_id), path(tsv_gz)
+
+    output:
+    tuple val(sample_id), path("${sample_id}.cs.bed.gz"), emit: bed
+
+    script:
+    """
+    tsv_to_cs_bed.py \\
+        --tsv ${tsv_gz} \\
+        --out_bed ${sample_id}.cs.bed.gz \\
+        --cs_tag ${params.tag_quantification_cs}
     """
 }
 
