@@ -136,11 +136,6 @@ workflow {
         annotate_reads_with_motifs.out.bam.join(annotate_reads_with_motifs.out.bai)
     )
 
-    // Generate BED file of grouped cleavage sites - for usage in downstream applications like PAQR-AI
-    create_cs_bed(
-        extract_read_tags_tsv.out.tsv
-    )
-
     // Generate Comparative Boxplots across all samples
     // Extract just the file (index 1 of the tuple) and collect them into a list
     tsv_list_ch = extract_read_tags_tsv.out.tsv.map { sample_id, tsv_file -> tsv_file }.collect()
@@ -785,7 +780,7 @@ process make_bigwig_for_cleavage_sites {
     output:
     tuple val(sample_id), path("${sample_id}.plus.bigwig"), emit: bw_plus
     tuple val(sample_id), path("${sample_id}.minus.bigwig"), emit: bw_minus
-    tuple val(sample_id), path("${sample_id}.read_sum.tsv"), emit: tsv
+    tuple val(sample_id), path("${sample_id}.cs.bed.gz"), emit: bed
 
     script:
     """
@@ -816,11 +811,14 @@ process make_bigwig_for_cleavage_sites {
     [ -s plus.sorted.bg ]  && bedGraphToBigWig plus.sorted.bg  ${fasta}.fai ${sample_id}.plus.bigwig  || touch ${sample_id}.plus.bigwig
     [ -s minus.sorted.bg ] && bedGraphToBigWig minus.sorted.bg ${fasta}.fai ${sample_id}.minus.bigwig || touch ${sample_id}.minus.bigwig
 
-    # 7. Generate Summary TSV (chr, start, end, strand, weighted_count)
-    bedtools groupby -i cs.sorted.bed -g 1,2,3,6 -c 5 -o sum > ${sample_id}.read_sum.tsv
+    # 7. Generate standard BED6 format, Gzipped (chr, start, end, name, sum_weight, strand)
+    # bedtools groupby outputs: 1=chr, 2=start, 3=end, 4=strand, 5=sum(weight)
+    bedtools groupby -i cs.sorted.bed -g 1,2,3,6 -c 5 -o sum \\
+        | awk -F'\\t' -v OFS='\\t' '{print \$1, \$2, \$3, \$1":"\$2":"\$3":"\$4, \$5, \$4}' \\
+        | gzip > ${sample_id}.cs.bed.gz
     
     # Clean up intermediate large files
-    rm cs.bed plus.bg minus.bg plus.sorted.bg minus.sorted.bg
+    rm cs.bed plus.bg minus.bg plus.sorted.bg minus.sorted.bg cs.sorted.bed
     """
 }
 
@@ -928,27 +926,6 @@ process extract_read_tags_tsv {
         --tsv_out ${sample_id}.tags.tsv.gz \\
         --tags ${params.bam_export_tags} \\
         --include_multimappers ${params.include_multimappers}
-    """
-}
-
-process create_cs_bed {
-    tag "${sample_id}"
-    publishDir "${params.outdir}/CS_bed_quantification", mode: 'copy'
-    label 'process_medium_low_cpu'
-    label 'env_bam_processing_with_python'
-
-    input:
-    tuple val(sample_id), path(tsv_gz)
-
-    output:
-    tuple val(sample_id), path("${sample_id}.cs.bed.gz"), emit: bed
-
-    script:
-    """
-    tsv_to_cs_bed.py \\
-        --tsv ${tsv_gz} \\
-        --out_bed ${sample_id}.cs.bed.gz \\
-        --cs_tag ${params.tag_quantification_cs}
     """
 }
 
