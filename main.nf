@@ -794,8 +794,8 @@ process make_bigwig_for_cleavage_sites {
         --tag ${params.tag_quantification_cs} \\
         --include_multimappers ${params.include_multimappers}
 
-    # 3. Sort the extracted BED
-    sort -k1,1 -k2,2n cs.bed > cs.sorted.bed
+    # 3. Sort the extracted BED by chr, start, end, AND strand (-k6,6)
+    sort -k1,1 -k2,2n -k3,3n -k6,6 cs.bed > cs.sorted.bed
 
     # 4. Generate Weighted BedGraphs per strand
     # Since intervals are exactly 1bp long, we just group by coordinate and sum the weights (col 5).
