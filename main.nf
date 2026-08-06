@@ -124,27 +124,6 @@ workflow {
     )
 
     // ==============================================================================
-    // polyA tail length bigwig generation, collection of tabular data, and visualization
-    // ==============================================================================
-
-    // Generate PolyA tail length BigWigs (Mean/Median depending on configuration)
-    make_bigwig_for_polya_length(
-        annotate_reads_with_motifs.out.bam.join(annotate_reads_with_motifs.out.bai), params.ref)
-
-    // Extract Read ID, pt, and XT tags to a TSV Table
-    extract_read_tags_tsv(
-        annotate_reads_with_motifs.out.bam.join(annotate_reads_with_motifs.out.bai)
-    )
-
-    // Generate Comparative Boxplots across all samples
-    // Extract just the file (index 1 of the tuple) and collect them into a list
-    tsv_list_ch = extract_read_tags_tsv.out.tsv.map { sample_id, tsv_file -> tsv_file }.collect()
-    
-    if (params.visualize_polyA_tail_length_distribution_flag) {
-        visualize_polyA_tail_length_distribution(tsv_list_ch)
-    }
-
-    // ==============================================================================
     // QC: MAPPING STATISTICS
     // ==============================================================================
     
@@ -158,7 +137,8 @@ workflow {
             append_polyA_tails.out.bam.map{ id, bam -> [id, bam, "07_appended_polyA_tails"] },
             umi_tools_dedup.out.bam.map{ id, bam -> [id, bam, "08_umi_deduped"] },
             redefine_nh_tags.out.bam.map{ id, bam -> [id, bam, "09_nh_tags_and_MAPQ_redefined"] },
-            assign_alignments_to_genes.out.bam.map{ id, bam -> [id, bam, "10_geneID_assigned"] }
+            assign_alignments_to_genes.out.bam.map{ id, bam -> [id, bam, "10_geneID_assigned"] },
+            annotate_reads_with_motifs.out.bam.map{ id, bam -> [id, bam, "11_CPAmotifs_assigned"] }
         )
 
     // Call count_reads
@@ -171,7 +151,7 @@ workflow {
     // ==============================================================================
     
     // 5.a Collect all redefined BAM files
-    all_bams_ch = redefine_nh_tags.out.bam.map { it[1] }.collect()
+    all_bams_ch = annotate_reads_with_motifs.out.bam.map { it[1] }.collect()
     
     // 5.b build "enriched" transcriptome annotation using all aligned reads across all input samples
     transcriptome_annotation_enrichment(
@@ -180,36 +160,64 @@ workflow {
     )
 
     // 5.c Assign individual alignments for each sample to the transcript isoforms in enriched transcriptome
+    //     Input is the motif-annotated BAM so the output carries XT, YF and YT together
     read_to_transcript_assignment(
-        redefine_nh_tags.out.bam, 
+        annotate_reads_with_motifs.out.bam,
         transcriptome_annotation_enrichment.out.tsv
     )
+    // ==============================================================================
+    // Extract tags for each read into TSV for downstream analysis
+    // ==============================================================================
+
+    // Extract tags (including YT) to TSV - must run after transcript assignment
+    extract_read_tags_tsv(
+        read_to_transcript_assignment.out.bam.join(read_to_transcript_assignment.out.bai)
+    )
+
+    // ==============================================================================
+    // polyA tail length bigwig generation, collection of tabular data, and visualization
+    // ==============================================================================
+
+    // Generate PolyA tail length BigWigs (Mean/Median depending on configuration)
+    make_bigwig_for_polya_length(
+        read_to_transcript_assignment.out.bam.join(read_to_transcript_assignment.out.bai), params.ref)
+
+    // Generate Comparative Boxplots across all samples
+    tsv_list_ch = extract_read_tags_tsv.out.tsv.map { sample_id, tsv_file -> tsv_file }.collect()
+
+    if (params.visualize_polyA_tail_length_distribution_flag) {
+        visualize_polyA_tail_length_distribution(tsv_list_ch)
+    }
 
     // ==============================================================================
     // QC: Raw Current Signal visualization and annotation
     // ==============================================================================
 
-    // a. Selection: Pick the random Read IDs to investigate
-    // extract_read_ids(redefine_nh_tags.out.bam)
+    // a. Selection: Pick the random Read IDs to investigate using the extracted TSV tags
+    extract_read_ids(extract_read_tags_tsv.out.tsv)
 
-    // // b. We take all original POD5 paths and group them by sample_id
-    // // This allows one process to search all files at once.
-    // all_pod5s_per_sample = samples_ch.map { id, pod5 -> [id, pod5] }.groupTuple()
+    // b. We take all original POD5 paths and group them by sample_id
+    // This allows one process to search all files at once.
+    all_pod5s_per_sample = samples_ch.map { id, pod5 -> [id, pod5] }.groupTuple()
     
-    // filter_input_ch = extract_read_ids.out.ids_file.join(all_pod5s_per_sample)
-    // filter_pod5_combined(filter_input_ch)
+    filter_input_ch = extract_read_ids.out.ids_file.join(all_pod5s_per_sample)
+    filter_pod5_combined(filter_input_ch)
 
-    // // c. Deep Dive: Re-run Dorado for moves on the subsampled POD5
-    // dorado_emit_moves(filter_pod5_combined.out.pod5)
+    // c. Deep Dive: Re-run Dorado for moves on the subsampled POD5
+    dorado_emit_moves(filter_pod5_combined.out.pod5)
 
-    // // d. Prepare Data: Join the subsampled POD5 and its Move-BAM to generate CSVs
-    // final_input_ch = filter_pod5_combined.out.pod5.join(dorado_emit_moves.out.bam)
-    // generate_signal_df(final_input_ch)
+    // d. Prepare Data: Join the subsampled POD5 and its Move-BAM to generate CSVs
+    final_input_ch = filter_pod5_combined.out.pod5.join(dorado_emit_moves.out.bam)
+    generate_signal_df(final_input_ch)
 
-    // // e. Visualize: Plot the squiggles for each individual read
-    // visualize_input = generate_signal_df.out.results.transpose()
-    // visualize_signal(visualize_input)
-}
+    // e. Visualize: Plot the squiggles for each individual read
+    visualize_input = generate_signal_df.out.results.transpose()
+    
+    // Combine the CSV channel with the fully annotated BAM+BAI channel (by sample_id)
+    motif_bam_bai_ch = annotate_reads_with_motifs.out.bam.join(annotate_reads_with_motifs.out.bai)
+    visualize_joined = visualize_input.combine(motif_bam_bai_ch, by: 0)
+    
+    visualize_signal(visualize_joined)}
 
 /*
 ========================================================================================
@@ -909,7 +917,7 @@ process make_bigwig_for_polya_length {
 
 process extract_read_tags_tsv {
     tag "${sample_id}"
-    publishDir "${params.outdir}/read_tag_tables", mode: 'copy'
+    publishDir "${params.outdir}/read_tags", mode: 'copy'
     label 'process_medium_low_cpu'
     label 'env_bam_processing_with_python'
 
@@ -920,12 +928,15 @@ process extract_read_tags_tsv {
     tuple val(sample_id), path("${sample_id}.tags.tsv.gz"), emit: tsv
 
     script:
+    // Conditionally create the flag string based on the boolean parameter
+    def mm_flag = params.include_multimappers ? "--include_multimappers" : ""
+    
     """
     extract_bam_tags.py \\
         --bam_in ${bam} \\
         --tsv_out ${sample_id}.tags.tsv.gz \\
         --tags ${params.bam_export_tags} \\
-        --include_multimappers ${params.include_multimappers}
+        ${mm_flag}
     """
 }
 
@@ -1014,33 +1025,61 @@ process read_to_transcript_assignment {
     path enriched_tsv
 
     output:
-    tuple val(sample_id), path("${sample_id}_assignments.tsv.gz"), emit: tsv
-    path "${sample_id}_unassigned.tsv.gz", optional: true
+    tuple val(sample_id), path("${sample_id}.transcript_assigned.bam"), emit: bam
+    tuple val(sample_id), path("${sample_id}.transcript_assigned.bam.bai"), emit: bai
 
     script:
     """
-    assign_ONT_reads_to_isoforms.py \\
-        --mode assign \\
-        --input_bam_files ${bam} \\
-        --input_gtf_file ${enriched_tsv} \\
-        --output_prefix ${sample_id}    
+    tag_bam_with_transcript.py \\
+        --bam_in ${bam} \\
+        --enriched_tsv ${enriched_tsv} \\
+        --bam_out ${sample_id}.transcript_assigned.bam \\
+        --tag ${params.tag_transcript_id}
     """
 }
 
 process extract_read_ids {
     tag "${sample_id}"
     label 'process_single'
-    label 'env_samtools'
+    label 'env_plot'
     
     input:
-    tuple val(sample_id), path(bam)
+    tuple val(sample_id), path(tsv)
 
     output:
     tuple val(sample_id), path("${sample_id}_read_ids.txt"), emit: ids_file
 
     script:
+    // Safely check if the parameter exists to prevent MissingPropertyExceptions
+    def gene_list = params.containsKey('viz_gene_list') ? params.viz_gene_list : ""
+    
     """
-    samtools view ${bam} | cut -f1 | sort -u | shuf -n ${params.num_reads} > ${sample_id}_read_ids.txt
+    #!/usr/bin/env python3
+    import pandas as pd
+    import numpy as np
+    
+    df = pd.read_csv("${tsv}", sep='\\t')
+    
+    # Filter strictly for reads that have successfully assigned genes
+    df = df[(df['XT'].notna()) & (df['XT'] != 'NA')]
+    
+    gene_list_str = "${gene_list}".strip()
+    num_reads = int(${params.num_reads})
+    
+    if gene_list_str:
+        # 1. Parameter provided: Select these specific genes
+        genes = gene_list_str.split()
+    else:
+        # 2. No parameter: Select randomly 'num_reads' genes
+        unique_genes = df['XT'].unique()
+        genes = np.random.choice(unique_genes, min(len(unique_genes), num_reads), replace=False)
+        
+    df_sub = df[df['XT'].isin(genes)]
+    
+    # Group by gene and randomly sample 'num_reads' from every gene in the list
+    sampled = df_sub.groupby('XT').apply(lambda x: x.sample(min(len(x), num_reads))).reset_index(drop=True)
+        
+    sampled['read_id'].to_csv("${sample_id}_read_ids.txt", index=False, header=False)
     """
 }
 
@@ -1058,7 +1097,6 @@ process filter_pod5_combined {
 
     script:
     """
-    # Scans all chunks in one pass to find the target IDs
     pod5 filter ${all_pod5_chunks} \\
         --output ${sample_id}.subset.pod5 \\
         --ids ${read_ids_txt} \\
@@ -1111,13 +1149,14 @@ process generate_signal_df {
 }
 
 process visualize_signal {
-    tag "${sample_id} - ${pod5_name}"
+    tag "${sample_id} - ${csv.baseName}"
     publishDir "${params.qc_base_dir}/${sample_id}/${pod5_name}", mode: 'copy'
     label 'process_low'
     label 'env_plot'
 
     input:
-    tuple val(sample_id), val(pod5_name), path(csv)
+    // This perfectly matches the output of combine(..., by: 0)
+    tuple val(sample_id), val(pod5_name), path(csv), path(bam), path(bai)
 
     output:
     path "*.pdf"
@@ -1126,10 +1165,21 @@ process visualize_signal {
     def read_id = csv.baseName.replace("_mapped", "")
     def circle_flag = params.emit_circles ? "--emit_circles" : ""
     """
+    # 1. Extract the specific read's alignment from the fully annotated BAM
+    READ_LINE=\$(samtools view ${bam} | grep -w "^${read_id}" | head -n 1)
+    
+    # 2. Parse out the Gene (XT) and PolyA Length (pt) tags using regex/grep
+    GENE=\$(echo "\$READ_LINE" | grep -o 'XT:Z:[^[:blank:]]*' | cut -d':' -f3 || echo "Unknown")
+    PT=\$(echo "\$READ_LINE" | grep -o 'pt:i:[^[:blank:]]*' | cut -d':' -f3 || echo "NA")
+    
+    # 3. Construct the dynamic title
+    CUSTOM_TITLE="${read_id} | Gene: \$GENE | pt: \$PT nt"
+    
+    # 4. Pass the title and the CSV to the python script
     plot_signal.py \\
         --csv ${csv} \\
         --output ${read_id}.pdf \\
-        --title "Read: ${read_id}" \\
+        --title "\$CUSTOM_TITLE" \\
         --figwidth ${params.figwidth} \\
         --figheight ${params.figheight} \\
         ${circle_flag}

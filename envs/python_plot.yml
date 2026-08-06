@@ -1,8 +1,10 @@
 name: nf-plot
 channels:
   - conda-forge
+  - bioconda
 dependencies:
   - python=3.10
+  - samtools
   - pip
   - pip:
       # This tells pip to install directly from the branches of the GitHub repos
