@@ -24,7 +24,6 @@ def main():
         required=True,
         help="Output figure filename (extension controls format, e.g. .png, .pdf)"
     )
-    parser.add_argument('--title', default="Nanopore Read Signal")
     parser.add_argument(
         '--figwidth',
         type=float,
@@ -37,11 +36,16 @@ def main():
         default=3.2,
         help="Figure height in inches (default: 3.2)"
     )
-    # NEW FLAG: Controlled via Nextflow params.emit_circles
     parser.add_argument(
         '--emit_circles', 
         action='store_true', 
         help="If set, plot red circles for samples that emit bases"
+    )
+    parser.add_argument(
+        '--title', 
+        type=str, 
+        default=None, 
+        help="Custom title for the plot"
     )
     args = parser.parse_args()
 
@@ -143,6 +147,11 @@ def main():
             ax.set(title=args.title)
             ax.tick_params(left=True, bottom=True)
             
+            if args.title:
+                plt.title(args.title)
+            else:
+                plt.title(f"Read: {args.read_id}")
+
             # Legend placement
             ax.legend(bbox_to_anchor=(1.05, 1), loc=2, borderaxespad=0.0)
             plt.tight_layout()

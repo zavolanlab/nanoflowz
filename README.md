@@ -13,12 +13,15 @@ The pipeline takes advantage of several functions implemented in [zavolab_pyutil
 2. **Reverse-complementing reads from backward strand**: sequencing can be done in both directions in the cDNA protocol (optional).
 3. **Alignment & Merging (`minimap2`)**: Maps reads to the reference genome using minimap2 and merges BAMs (e.g. technical replicates from samples).
 4. **UMI deduplication (`umi_tools`, `custom python`)**: normalizing UMI lengths -> UMI- and alignment-based deduplication -> correction of NH tag and MAPQ values.
-5. **De novo transcriptome assembly (`custom python`)**: Enriches input transcriptome annotations based on observed read alignments
-6. **Isoform Analysis (`custom python`)**: Assigns alignments to specific transcript isoforms.
-7. **QC: annotating raw current data from a subsample of reads**: 
-7.1 **Signal Extraction (`pod5`)**: Subsamples reads of interest and extracts corresponding raw signal chunks from `.pod5` files.
-7.2 **Move-table Emission (`dorado`)**: Re-processes subsetted reads to emit basecaller move-tables. 
-7.3 **Dataframe Generation & QC Visualization (`seaborn`)**: Synchronizes sequence strings with raw signal variations and renders PDF plots for individual reads.
+5. **Assignment of reads to genes (`featureCounts`)**: uses featureCounts to produce .bam files where every read is assigned to gene ids from input .gtf file (`XT` tag).
+6. **Identification of CPA cleavage sites (`SCINPAS`)**: uses [SCINPAS](https://github.com/zavolanlab/SCINPAS/tree/making_CLI_interface_for_python_functions) functionalities to identify cleavage-and-polyadenylation sites in reads, and store this information in reads (see [nextflow.config](nextflow.config) for details)
+7. **Generation of `.bigwig` files** storing cleavage site support and mean (or median) polyA tail lengths for every cleavage site
+8. **De novo transcriptome assembly (`custom python`)**: Enriches input transcriptome annotations based on observed read alignments
+9. **Isoform Analysis (`custom python`)**: Assigns alignments to specific transcript isoforms.
+10. **QC: annotating raw current data from a subsample of reads**: 
+10.1 **Signal Extraction (`pod5`)**: Subsamples reads of interest and extracts corresponding raw signal chunks from `.pod5` files.
+10.2 **Move-table Emission (`dorado`)**: Re-processes subsetted reads to emit basecaller move-tables. 
+10.3 **Dataframe Generation & QC Visualization (`seaborn`)**: Synchronizes sequence strings with raw signal variations and renders PDF plots for individual reads.
 
 ## Quick Start
 
