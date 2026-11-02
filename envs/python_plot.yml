@@ -1,9 +1,13 @@
 name: nf-plot
 channels:
   - conda-forge
+  - bioconda
 dependencies:
-  - python=3
-  - pandas
-  - scipy
-  - seaborn
-  - scikit-learn
+  - python=3.10
+  - samtools
+  - pip
+  - pip:
+      # This tells pip to install directly from the branches of the GitHub repos
+      - git+https://github.com/zavolanlab/zavolab_pyutils.git@dev
+
+# Cache Bust: Added April 28 15:04 to force pip pulling the latest version of zavolab_pyutils

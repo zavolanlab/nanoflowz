@@ -13,12 +13,15 @@ The pipeline takes advantage of several functions implemented in [zavolab_pyutil
 2. **Reverse-complementing reads from backward strand**: sequencing can be done in both directions in the cDNA protocol (optional).
 3. **Alignment & Merging (`minimap2`)**: Maps reads to the reference genome using minimap2 and merges BAMs (e.g. technical replicates from samples).
 4. **UMI deduplication (`umi_tools`, `custom python`)**: normalizing UMI lengths -> UMI- and alignment-based deduplication -> correction of NH tag and MAPQ values.
-5. **De novo transcriptome assembly (`custom python`)**: Enriches input transcriptome annotations based on observed read alignments
-6. **Isoform Analysis (`custom python`)**: Assigns alignments to specific transcript isoforms.
-7. **QC: annotating raw current data from a subsample of reads**: 
-7.1 **Signal Extraction (`pod5`)**: Subsamples reads of interest and extracts corresponding raw signal chunks from `.pod5` files.
-7.2 **Move-table Emission (`dorado`)**: Re-processes subsetted reads to emit basecaller move-tables. 
-7.3 **Dataframe Generation & QC Visualization (`seaborn`)**: Synchronizes sequence strings with raw signal variations and renders PDF plots for individual reads.
+5. **Assignment of reads to genes (`featureCounts`)**: uses featureCounts to produce .bam files where every read is assigned to gene ids from input .gtf file (`XT` tag).
+6. **Identification of CPA cleavage sites (`SCINPAS`)**: uses [SCINPAS](https://github.com/zavolanlab/SCINPAS/tree/making_CLI_interface_for_python_functions) functionalities to identify cleavage-and-polyadenylation sites in reads, and store this information in reads (see [nextflow.config](nextflow.config) for details)
+7. **Generation of `.bigwig` files** storing cleavage site support and mean (or median) polyA tail lengths for every cleavage site
+8. **De novo transcriptome assembly (`custom python`)**: Enriches input transcriptome annotations based on observed read alignments
+9. **Isoform Analysis (`custom python`)**: Assigns alignments to specific transcript isoforms.
+10. **QC: annotating raw current data from a subsample of reads**: 
+10.1 **Signal Extraction (`pod5`)**: Subsamples reads of interest and extracts corresponding raw signal chunks from `.pod5` files.
+10.2 **Move-table Emission (`dorado`)**: Re-processes subsetted reads to emit basecaller move-tables. 
+10.3 **Dataframe Generation & QC Visualization (`seaborn`)**: Synchronizes sequence strings with raw signal variations and renders PDF plots for individual reads.
 
 ## Quick Start
 
@@ -69,8 +72,18 @@ Output directory can be specified by setting `outdir` parameter, by default set 
 
 Nextflow working directory with all the intermediate files can be specified by setting `workdir_param` parameter, by default set to `${params.rundir}/work`.
 
-### 5. Run the Pipeline
-Execute the pipeline using the `-profile conda` flag. This ensures Nextflow handles all Python/Samtools dependencies automatically by automatically creating conda environments from `.yml` files stored in [envs](envs/) subdirectory.
+### 5. Pre-install Conda Environments
+Execute the pipeline using the `-profile conda` flag. This ensures Nextflow handles all Python/Samtools dependencies by creating conda environments from `.yml` files stored in [envs](envs/) subdirectory.
+
+Building an environment requires internet access, while compute nodes of HPC clusters (e.g. sciCORE) usually have none. If Nextflow runs on a compute node and an environment is missing, the run fails with `Failed to create Conda environment`. Therefore, **build all environments beforehand** on a node with internet access (login node, `vscode` node, etc.), using the same `run_params.json` as for the main run:
+```bash
+nextflow run /path/to/nanoflowz/install_conda_envs.nf -params-file /path/to/run_params.json -profile conda
+```
+[install_conda_envs.nf](install_conda_envs.nf) runs one tiny local task per `.yml` file in [envs](envs/) and lets Nextflow create the corresponding environment in `conda_envs_dir` (default `${rundir}/conda_envs`). Nextflow names each environment directory by a hash of the `.yml` content, so the main run finds and reuses them without any network access. Environments that already exist are skipped, so it is safe to rerun.
+
+Rerun the installer whenever a `.yml` file in [envs](envs/) changes or `conda_envs_dir` points to a new location. Tip: set `conda_envs_dir` to a shared location to reuse the environments across runs.
+
+### 6. Run the Pipeline
 
 Look [here](https://docs.seqera.io/nextflow/cli) to see various ways to execute nextflow from CLI.
 
