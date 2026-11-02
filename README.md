@@ -72,8 +72,18 @@ Output directory can be specified by setting `outdir` parameter, by default set 
 
 Nextflow working directory with all the intermediate files can be specified by setting `workdir_param` parameter, by default set to `${params.rundir}/work`.
 
-### 5. Run the Pipeline
-Execute the pipeline using the `-profile conda` flag. This ensures Nextflow handles all Python/Samtools dependencies automatically by automatically creating conda environments from `.yml` files stored in [envs](envs/) subdirectory.
+### 5. Pre-install Conda Environments
+Execute the pipeline using the `-profile conda` flag. This ensures Nextflow handles all Python/Samtools dependencies by creating conda environments from `.yml` files stored in [envs](envs/) subdirectory.
+
+Building an environment requires internet access, while compute nodes of HPC clusters (e.g. sciCORE) usually have none. If Nextflow runs on a compute node and an environment is missing, the run fails with `Failed to create Conda environment`. Therefore, **build all environments beforehand** on a node with internet access (login node, `vscode` node, etc.), using the same `run_params.json` as for the main run:
+```bash
+nextflow run /path/to/nanoflowz/install_conda_envs.nf -params-file /path/to/run_params.json -profile conda
+```
+[install_conda_envs.nf](install_conda_envs.nf) runs one tiny local task per `.yml` file in [envs](envs/) and lets Nextflow create the corresponding environment in `conda_envs_dir` (default `${rundir}/conda_envs`). Nextflow names each environment directory by a hash of the `.yml` content, so the main run finds and reuses them without any network access. Environments that already exist are skipped, so it is safe to rerun.
+
+Rerun the installer whenever a `.yml` file in [envs](envs/) changes or `conda_envs_dir` points to a new location. Tip: set `conda_envs_dir` to a shared location to reuse the environments across runs.
+
+### 6. Run the Pipeline
 
 Look [here](https://docs.seqera.io/nextflow/cli) to see various ways to execute nextflow from CLI.
 

@@ -104,7 +104,7 @@ workflow {
         params.reference_gtf
     )
 
-    // ==============================================================================
+    // =======================d=======================================================
     // CPA MOTIF ASSIGNMENT
     // ==============================================================================
 
@@ -664,7 +664,8 @@ process redefine_nh_tags {
 
 process count_reads {
     tag "${sample_id} - ${step_name}"
-    label 'process_medium'
+    maxForks 10
+    label 'process_low'
     label 'env_samtools'
 
     input:
