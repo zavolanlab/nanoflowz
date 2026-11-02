@@ -908,9 +908,9 @@ process make_bigwig_for_polya_length {
     sort -k1,1 -k2,2n plus.bg > plus.sorted.bg
     sort -k1,1 -k2,2n minus.bg > minus.sorted.bg
 
-    # Convert to BigWig
-    bedGraphToBigWig plus.sorted.bg ${fasta}.fai ${sample_id}.polya_${params.polya_tail_metric}.plus.bigwig
-    bedGraphToBigWig minus.sorted.bg ${fasta}.fai ${sample_id}.polya_${params.polya_tail_metric}.minus.bigwig
+    # Convert to BigWig (bedGraphToBigWig fails on empty input, e.g. for samples with (almost) no reads)
+    [ -s plus.sorted.bg ]  && bedGraphToBigWig plus.sorted.bg  ${fasta}.fai ${sample_id}.polya_${params.polya_tail_metric}.plus.bigwig  || touch ${sample_id}.polya_${params.polya_tail_metric}.plus.bigwig
+    [ -s minus.sorted.bg ] && bedGraphToBigWig minus.sorted.bg ${fasta}.fai ${sample_id}.polya_${params.polya_tail_metric}.minus.bigwig || touch ${sample_id}.polya_${params.polya_tail_metric}.minus.bigwig
     
     rm plus.bg minus.bg plus.sorted.bg minus.sorted.bg
     """

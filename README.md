@@ -41,6 +41,7 @@ barcode02	/absolute/path/to/data/barcode02/file_2.pod5
 ### 2. Install Dorado
 Currently, the only officially supported way is to install Dorado from their [github repository](https://github.com/nanoporetech/dorado). 
 Follow the instructions there.
+Note that Dorado is licensed for research purposes only (see [Third-party Software and Licences](#third-party-software-and-licences)).
 Get the path to `dorado` executor (e.g. `$HOME/packages/dorado-1.4.0-linux-x64/bin/dorado`).
 
 ### 3. Download basecalling model(s) for Dorado
@@ -144,6 +145,11 @@ rundir/
 ├── work/                 # 🗑️ Nextflow temporary execution directories (Safe to delete post-run)
 └── conda_envs/           # 📦 Isolated software environments for this specific run
 ```
+
+## Third-party Software and Licences
+The MIT License of this repository covers the nanoflowz code only. Nanoflowz does not include or redistribute any third-party tools: they are installed by the user (Dorado) or by conda from the respective channels, and each remains under its own licence.
+
+In particular, **Dorado** is distributed by Oxford Nanopore Technologies under the [Oxford Nanopore Technologies PLC. Public License v1.0](https://github.com/nanoporetech/dorado/blob/master/LICENCE.txt), which permits use for **research purposes only** (non-commercial). By running nanoflowz you use Dorado and must comply with its licence; any other use requires a separate agreement with Oxford Nanopore Technologies. The same applies to the Dorado basecalling models you download.
 
 ## Credits
 Nanoflowz was originally written by the Zavolan Lab.
