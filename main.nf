@@ -200,7 +200,13 @@ workflow {
     // This allows one process to search all files at once.
     all_pod5s_per_sample = samples_ch.map { id, pod5 -> [id, pod5] }.groupTuple()
     
-    filter_input_ch = extract_read_ids.out.ids_file.join(all_pod5s_per_sample)
+    // Skip samples without any selected reads (e.g. (almost) no gene-assigned reads): `pod5 filter` fails on an empty ID list
+    non_empty_ids_ch = extract_read_ids.out.ids_file.filter { sample_id, ids_file ->
+        if (ids_file.size() > 0) return true
+        log.warn "Skipping raw signal visualization for ${sample_id}: no reads selected"
+        return false
+    }
+    filter_input_ch = non_empty_ids_ch.join(all_pod5s_per_sample)
     filter_pod5_combined(filter_input_ch)
 
     // c. Deep Dive: Re-run Dorado for moves on the subsampled POD5
@@ -1041,7 +1047,7 @@ process read_to_transcript_assignment {
 
 process extract_read_ids {
     tag "${sample_id}"
-    label 'process_single'
+    label 'process_medium'
     label 'env_plot'
     
     input:
