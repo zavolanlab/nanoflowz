@@ -146,6 +146,17 @@ rundir/
 └── conda_envs/           # 📦 Isolated software environments for this specific run
 ```
 
+### README files in the outputs
+At the start of every run, [bin/write_output_readmes.py](bin/write_output_readmes.py) writes a `README.md` into `outdir` and into each of its subfolders. These describe the files, their formats, the BAM tags and the processing steps, with the parameter values of the run. It also writes one into `rundir`, unless a `README.md` already exists there. Set `write_readmes` to `false` to skip this.
+
+The script needs only the Python standard library, so it can also document the results of an older run without rerunning it:
+```bash
+python bin/write_output_readmes.py --outdir /path/to/rundir/results --params /path/to/rundir/run_params.json \
+    --rundir_readme /path/to/rundir/README.md --only_existing \
+    [--sample_annotation annotation.tsv] [--notes run_notes.md]
+```
+`--only_existing` writes READMEs only into folders that exist. `--sample_annotation` (a TSV with a `sample_id` column) adds columns to the sample table. `--notes` (a Markdown file) adds run-specific notes. Parameters missing from `run_params.json` take the current defaults of `nextflow.config`; if a run used other defaults, pass a second JSON file with them (later files override earlier ones).
+
 ## Third-party Software and Licences
 The MIT License of this repository covers the nanoflowz code only. Nanoflowz does not include or redistribute any third-party tools: they are installed by the user (Dorado) or by conda from the respective channels, and each remains under its own licence.
 

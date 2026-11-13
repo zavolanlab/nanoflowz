@@ -25,6 +25,12 @@ workflow {
     // 0b. Build the minimap2 index once from the reference FASTA
     build_minimap2_index(params.ref)
 
+    // 0c. README files that explain the output folders (results/ and its subfolders, and the run directory)
+    if (params.write_readmes) {
+        def params_map = params.collectEntries { k, v -> [(k): (v == null || v instanceof Boolean || v instanceof Number) ? v : v.toString()] }
+        write_output_readmes(groovy.json.JsonOutput.toJson(params_map), nanoflowz_version())
+    }
+
     // 1. Initial Data Ingest: Create a stream of (sample_id, pod5_file)
     samples_ch = channel
         .fromPath(params.tsv)
@@ -230,6 +236,49 @@ workflow {
     PROCESS DEFINITIONS
 ========================================================================================
 */
+
+// git commit of nanoflowz (for the README files); empty if not a git checkout
+def nanoflowz_version() {
+    if (workflow.commitId) return "${workflow.revision ?: ''} ${workflow.commitId}".trim()
+    try {
+        def commit = "git -C ${projectDir} describe --always --dirty".execute().text.trim()
+        def branch = "git -C ${projectDir} rev-parse --abbrev-ref HEAD".execute().text.trim()
+        return commit ? "${commit} (branch ${branch})" : ""
+    } catch (Exception _e) {
+        return ""
+    }
+}
+
+process write_output_readmes {
+    label 'process_single'
+    label 'env_bam_processing_with_python'
+    executor 'local'
+    // results/** -> outdir; rundir/README.md -> rundir (an existing README there is kept)
+    publishDir "${params.outdir}", mode: 'copy', saveAs: { fn -> fn.startsWith('results/') ? fn.substring('results/'.length()) : null }
+    publishDir "${params.rundir}", mode: 'copy', overwrite: false, saveAs: { fn -> fn == 'rundir/README.md' ? 'README.md' : null }
+
+    input:
+    val params_json
+    val version
+
+    output:
+    path "results/**README.md"
+    path "rundir/README.md"
+
+    script:
+    """
+    cat > run_params.json <<'PARAMS_JSON'
+    ${params_json}
+    PARAMS_JSON
+
+    write_output_readmes.py \\
+        --outdir results \\
+        --params run_params.json \\
+        --rundir_readme rundir/README.md \\
+        --nanoflowz_version "${version}" \\
+        --run_name "${workflow.runName}"
+    """
+}
 
 process build_minimap2_index {
     label 'process_medium'
