@@ -25,6 +25,12 @@ workflow {
     // 0b. Build the minimap2 index once from the reference FASTA
     build_minimap2_index(params.ref)
 
+    // 0c. README files that explain the output folders (results/ and its subfolders, and the run directory)
+    if (params.write_readmes) {
+        def params_map = params.collectEntries { k, v -> [(k): (v == null || v instanceof Boolean || v instanceof Number) ? v : v.toString()] }
+        write_output_readmes(groovy.json.JsonOutput.toJson(params_map), nanoflowz_version())
+    }
+
     // 1. Initial Data Ingest: Create a stream of (sample_id, pod5_file)
     samples_ch = channel
         .fromPath(params.tsv)
@@ -200,7 +206,13 @@ workflow {
     // This allows one process to search all files at once.
     all_pod5s_per_sample = samples_ch.map { id, pod5 -> [id, pod5] }.groupTuple()
     
-    filter_input_ch = extract_read_ids.out.ids_file.join(all_pod5s_per_sample)
+    // Skip samples without any selected reads (e.g. (almost) no gene-assigned reads): `pod5 filter` fails on an empty ID list
+    non_empty_ids_ch = extract_read_ids.out.ids_file.filter { sample_id, ids_file ->
+        if (ids_file.size() > 0) return true
+        log.warn "Skipping raw signal visualization for ${sample_id}: no reads selected"
+        return false
+    }
+    filter_input_ch = non_empty_ids_ch.join(all_pod5s_per_sample)
     filter_pod5_combined(filter_input_ch)
 
     // c. Deep Dive: Re-run Dorado for moves on the subsampled POD5
@@ -224,6 +236,49 @@ workflow {
     PROCESS DEFINITIONS
 ========================================================================================
 */
+
+// git commit of nanoflowz (for the README files); empty if not a git checkout
+def nanoflowz_version() {
+    if (workflow.commitId) return "${workflow.revision ?: ''} ${workflow.commitId}".trim()
+    try {
+        def commit = "git -C ${projectDir} describe --always --dirty".execute().text.trim()
+        def branch = "git -C ${projectDir} rev-parse --abbrev-ref HEAD".execute().text.trim()
+        return commit ? "${commit} (branch ${branch})" : ""
+    } catch (Exception _e) {
+        return ""
+    }
+}
+
+process write_output_readmes {
+    label 'process_single'
+    label 'env_bam_processing_with_python'
+    executor 'local'
+    // results/** -> outdir; rundir/README.md -> rundir (an existing README there is kept)
+    publishDir "${params.outdir}", mode: 'copy', saveAs: { fn -> fn.startsWith('results/') ? fn.substring('results/'.length()) : null }
+    publishDir "${params.rundir}", mode: 'copy', overwrite: false, saveAs: { fn -> fn == 'rundir/README.md' ? 'README.md' : null }
+
+    input:
+    val params_json
+    val version
+
+    output:
+    path "results/**README.md"
+    path "rundir/README.md"
+
+    script:
+    """
+    cat > run_params.json <<'PARAMS_JSON'
+    ${params_json}
+    PARAMS_JSON
+
+    write_output_readmes.py \\
+        --outdir results \\
+        --params run_params.json \\
+        --rundir_readme rundir/README.md \\
+        --nanoflowz_version "${version}" \\
+        --run_name "${workflow.runName}"
+    """
+}
 
 process build_minimap2_index {
     label 'process_medium'
@@ -908,9 +963,9 @@ process make_bigwig_for_polya_length {
     sort -k1,1 -k2,2n plus.bg > plus.sorted.bg
     sort -k1,1 -k2,2n minus.bg > minus.sorted.bg
 
-    # Convert to BigWig
-    bedGraphToBigWig plus.sorted.bg ${fasta}.fai ${sample_id}.polya_${params.polya_tail_metric}.plus.bigwig
-    bedGraphToBigWig minus.sorted.bg ${fasta}.fai ${sample_id}.polya_${params.polya_tail_metric}.minus.bigwig
+    # Convert to BigWig (bedGraphToBigWig fails on empty input, e.g. for samples with (almost) no reads)
+    [ -s plus.sorted.bg ]  && bedGraphToBigWig plus.sorted.bg  ${fasta}.fai ${sample_id}.polya_${params.polya_tail_metric}.plus.bigwig  || touch ${sample_id}.polya_${params.polya_tail_metric}.plus.bigwig
+    [ -s minus.sorted.bg ] && bedGraphToBigWig minus.sorted.bg ${fasta}.fai ${sample_id}.polya_${params.polya_tail_metric}.minus.bigwig || touch ${sample_id}.polya_${params.polya_tail_metric}.minus.bigwig
     
     rm plus.bg minus.bg plus.sorted.bg minus.sorted.bg
     """
@@ -1041,7 +1096,7 @@ process read_to_transcript_assignment {
 
 process extract_read_ids {
     tag "${sample_id}"
-    label 'process_single'
+    label 'process_medium'
     label 'env_plot'
     
     input:

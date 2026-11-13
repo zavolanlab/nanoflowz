@@ -41,6 +41,7 @@ barcode02	/absolute/path/to/data/barcode02/file_2.pod5
 ### 2. Install Dorado
 Currently, the only officially supported way is to install Dorado from their [github repository](https://github.com/nanoporetech/dorado). 
 Follow the instructions there.
+Note that Dorado is licensed for research purposes only (see [Third-party Software and Licences](#third-party-software-and-licences)).
 Get the path to `dorado` executor (e.g. `$HOME/packages/dorado-1.4.0-linux-x64/bin/dorado`).
 
 ### 3. Download basecalling model(s) for Dorado
@@ -144,6 +145,22 @@ rundir/
 ├── work/                 # 🗑️ Nextflow temporary execution directories (Safe to delete post-run)
 └── conda_envs/           # 📦 Isolated software environments for this specific run
 ```
+
+### README files in the outputs
+At the start of every run, [bin/write_output_readmes.py](bin/write_output_readmes.py) writes a `README.md` into `outdir` and into each of its subfolders. These describe the files, their formats, the BAM tags and the processing steps, with the parameter values of the run. It also writes one into `rundir`, unless a `README.md` already exists there. Set `write_readmes` to `false` to skip this.
+
+The script needs only the Python standard library, so it can also document the results of an older run without rerunning it:
+```bash
+python bin/write_output_readmes.py --outdir /path/to/rundir/results --params /path/to/rundir/run_params.json \
+    --rundir_readme /path/to/rundir/README.md --only_existing \
+    [--sample_annotation annotation.tsv] [--notes run_notes.md]
+```
+`--only_existing` writes READMEs only into folders that exist. `--sample_annotation` (a TSV with a `sample_id` column) adds columns to the sample table. `--notes` (a Markdown file) adds run-specific notes. Parameters missing from `run_params.json` take the current defaults of `nextflow.config`; if a run used other defaults, pass a second JSON file with them (later files override earlier ones).
+
+## Third-party Software and Licences
+The MIT License of this repository covers the nanoflowz code only. Nanoflowz does not include or redistribute any third-party tools: they are installed by the user (Dorado) or by conda from the respective channels, and each remains under its own licence.
+
+In particular, **Dorado** is distributed by Oxford Nanopore Technologies under the [Oxford Nanopore Technologies PLC. Public License v1.0](https://github.com/nanoporetech/dorado/blob/master/LICENCE.txt), which permits use for **research purposes only** (non-commercial). By running nanoflowz you use Dorado and must comply with its licence; any other use requires a separate agreement with Oxford Nanopore Technologies. The same applies to the Dorado basecalling models you download.
 
 ## Credits
 Nanoflowz was originally written by the Zavolan Lab.
